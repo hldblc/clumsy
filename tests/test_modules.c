@@ -497,13 +497,60 @@ static void testTamper(void) {
     CHECK((n->flags & PN_FLAG_TAMPERED) != 0);
     listFreeAll(&l);
     packetFree(orig);
-    // without redo the checksum stays stale but the flags claim validity
-    CHECK(moduleSetParamText(tm, "checksum", "off"));
+    // leave: checksum stays stale but the flags claim validity
+    CHECK(moduleSetParamText(tm, "checksum", "leave"));
     n = mkUdp(5, 6, 200, 1);
     listPushBack(&l, n);
     runStep(tm, &l, T0);
     CHECK(!checksumsValid(n));
     CHECK(n->addr.UDPChecksum == 1 && n->addr.IPChecksum == 1);
+    listFreeAll(&l);
+
+    // zero-fill the payload
+    CHECK(moduleSetParamText(tm, "checksum", "redo"));
+    CHECK(moduleSetParamText(tm, "mode", "zero"));
+    n = mkUdp(5, 6, 100, 1);
+    listPushBack(&l, n);
+    runStep(tm, &l, T0);
+    {
+        int i, allZero = 1;
+        for (i = 0; i < 100; ++i) if ((unsigned char)n->packet[28 + i] != 0) allZero = 0;
+        CHECK(allZero);
+        CHECK(checksumsValid(n));
+    }
+    listFreeAll(&l);
+
+    // bitflip: exactly N bits change
+    CHECK(moduleSetParamText(tm, "mode", "bitflip"));
+    CHECK(moduleSetParamText(tm, "amount", "3"));
+    n = mkUdp(5, 6, 100, 1);
+    orig = packetClone(n);
+    listPushBack(&l, n);
+    runStep(tm, &l, T0);
+    {
+        int i, bits = 0;
+        for (i = 0; i < 100; ++i) {
+            unsigned char x = (unsigned char)(n->packet[28 + i] ^ orig->packet[28 + i]);
+            while (x) { bits += x & 1; x >>= 1; }
+        }
+        CHECK(bits >= 1 && bits <= 3);   // up to 3 (a bit may be picked twice)
+    }
+    packetFree(orig);
+    listFreeAll(&l);
+
+    // truncate payload to 10 bytes, lengths kept consistent
+    CHECK(moduleSetParamText(tm, "mode", "truncate"));
+    CHECK(moduleSetParamText(tm, "amount", "10"));
+    n = mkUdp(5, 6, 200, 1);
+    listPushBack(&l, n);
+    runStep(tm, &l, T0);
+    CHECK_EQ(n->packetLen, 20 + 8 + 10);
+    {
+        PWINDIVERT_IPHDR ip = NULL;
+        WinDivertHelperParsePacket(n->packet, n->packetLen, &ip, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+        CHECK_EQ(WinDivertHelperNtohs(ip->Length), n->packetLen);
+        CHECK(checksumsValid(n));
+    }
     listFreeAll(&l);
     ruleDestroy(r);
 }

@@ -17,7 +17,7 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [ ] 3. Burst loss with a two-state Gilbert-Elliott model
 - [ ] 4. Real bandwidth shaping: token bucket + queue, tail/head/random-early drop, bufferbloat
 - [ ] 5. Asymmetric per-direction values on every module
-- [ ] 8. Richer corruption modes: bit flips, truncate, zero-fill, header/payload, checksum policy
+- [x] 8. Richer corruption modes: xor, bit flips, zero-fill, truncate; payload/all region; redo/leave/corrupt checksum
 - [x] 10. TCP-aware impairments: SYN drop, pure-ACK drop, retransmit delay, window clamp, SYN option strip
 - [x] 11. Outages and link flapping (periodic or random, silent drop while down)
 - [x] 9. Fragmentation and MTU stress (IPv4 split into fragments, optional fragment loss)
