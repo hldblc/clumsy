@@ -65,11 +65,14 @@ int remoteBuildRules(char *buf, size_t size) {
         jsonEscape(esc, sizeof(esc), r->name); EMIT("%s", esc);
         EMIT("\",\"filter\":\""); jsonEscape(esc, sizeof(esc), r->filter); EMIT("%s", esc);
         EMIT("\",\"process\":\""); jsonEscape(esc, sizeof(esc), r->process); EMIT("%s", esc);
-        EMIT("\",\"enabled\":%s,\"modules\":[", r->enabled ? "true" : "false");
+        EMIT("\",\"enabled\":%s,\"matched\":%lld,\"modules\":[", r->enabled ? "true" : "false",
+             (long long)atomicLoad64(&r->matched));
         for (j = 0; j < r->moduleCount; ++j) {
             ModuleInst *m = r->modules[j];
-            EMIT("%s{\"name\":\"%s\",\"enabled\":%s,\"params\":{", j ? "," : "",
-                m->desc->shortName, m->enabled ? "true" : "false");
+            EMIT("%s{\"name\":\"%s\",\"enabled\":%s,\"stats\":{\"packets\":%lld,\"dropped\":%lld,\"queued\":%ld},\"params\":{",
+                 j ? "," : "", m->desc->shortName, m->enabled ? "true" : "false",
+                 (long long)atomicLoad64(&m->stats.packets), (long long)atomicLoad64(&m->stats.dropped),
+                 (long)atomicLoad32(&m->stats.queued));
             for (k = 0; k < m->desc->paramCount; ++k) {
                 char val[48];
                 if (m->desc->params[k].flags & PF_HIDDEN) continue;

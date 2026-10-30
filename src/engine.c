@@ -287,7 +287,7 @@ static void drain(void) {
         if (r != NULL && r->process[0]) {
             // scope the rule to one process via the flow-layer pid map
             char exe[64];
-            uint32_t pid = procflowLookup(n->packet, n->packetLen);
+            uint32_t pid = procflowLookup(n->packet, n->packetLen, n->addr.Outbound);
             n->processId = pid;
             if (pid == 0 || !procflowName(pid, exe, sizeof(exe)) || !processNameMatch(r->process, exe)) {
                 r = NULL;

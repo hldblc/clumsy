@@ -253,6 +253,7 @@ pub fn build(b: *Builder) void {
     exe.linkSystemLibrary("advapi32");
     exe.linkSystemLibrary("shell32");
     exe.linkSystemLibrary("user32");
+    exe.linkSystemLibrary("iphlpapi");
 
     const exe_install_step = b.addInstallArtifact(exe);
     if (conf == .Ship) {
@@ -281,6 +282,7 @@ pub fn build(b: *Builder) void {
     test_exe.linkSystemLibrary("psapi");
     test_exe.linkSystemLibrary("advapi32");
     test_exe.linkSystemLibrary("ws2_32");
+    test_exe.linkSystemLibrary("iphlpapi");
     test_exe.linkLibC();
     const run_tests = test_exe.run();
     run_tests.addPathDir(b.pathFromRoot(b.fmt("external/{s}/{s}", .{ windivert_dir, arch_tag })));

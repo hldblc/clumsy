@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 // ---- 5-tuple key ----
 static int endpointLess(const uint32_t a[4], uint16_t pa, const uint32_t b[4], uint16_t pb) {
@@ -179,6 +182,8 @@ static CRITICAL_SECTION lock;
 static int lockReady = 0;
 static NameEntry nameCache[NAME_CACHE];
 
+static void sockRefresh(int64_t now);   // defined with the socket-table fallback below
+
 int procflowRunning(void) {
     return flowState == 1;
 }
@@ -225,6 +230,7 @@ int procflowStart(char *err, size_t errSize) {
         flowTableFree(&table);
         return 0;
     }
+    sockRefresh(clockNowUs());    // prime with the sockets that already exist
     flowState = 1;
     flowThread = CreateThread(NULL, 0, flowLoop, NULL, 0, NULL);
     if (flowThread == NULL) {
@@ -256,13 +262,145 @@ void procflowStop(void) {
     }
 }
 
-uint32_t procflowLookup(const void *packet, UINT len) {
+// ---- fallback: sockets that already existed when we started ----
+// The FLOW layer only reports connections created after its handle opened, so
+// a game that was already connected would never be found there. The IP helper
+// tables list every UDP/TCP socket with its owning pid, keyed by local address
+// and port. Refreshed lazily on a miss, at most once a second, on the
+// processor thread only (so no lock is needed for this table).
+typedef struct {
+    uint32_t addr;     // network order, 0 = bound to any address
+    uint16_t port;     // network order
+    uint8_t proto;
+    uint8_t used;
+    uint32_t pid;
+} SockEntry;
+
+#define SOCK_TABLE 4096
+static SockEntry sockTable[SOCK_TABLE];
+static int64_t sockRefreshedUs = 0;
+#define SOCK_REFRESH_US 1000000LL
+
+static uint32_t sockHash(uint8_t proto, uint32_t addr, uint16_t port) {
+    uint32_t h = addr * 2654435761u;
+    h ^= (uint32_t)port * 40503u;
+    h ^= (uint32_t)proto * 97u;
+    return h;
+}
+
+static void sockPut(uint8_t proto, uint32_t addr, uint16_t port, uint32_t pid) {
+    uint32_t h = sockHash(proto, addr, port);
+    int i;
+    for (i = 0; i < 32; ++i) {
+        SockEntry *e = &sockTable[(h + i) & (SOCK_TABLE - 1)];
+        if (!e->used || (e->proto == proto && e->addr == addr && e->port == port)) {
+            e->proto = proto; e->addr = addr; e->port = port; e->pid = pid; e->used = 1;
+            return;
+        }
+    }
+}
+
+static uint32_t sockGet(uint8_t proto, uint32_t addr, uint16_t port) {
+    uint32_t h = sockHash(proto, addr, port);
+    int i;
+    for (i = 0; i < 32; ++i) {
+        SockEntry *e = &sockTable[(h + i) & (SOCK_TABLE - 1)];
+        if (!e->used) return 0;
+        if (e->proto == proto && e->addr == addr && e->port == port) return e->pid;
+    }
+    return 0;
+}
+
+static void sockRefresh(int64_t now) {
+    DWORD size = 0;
+    void *buf;
+    memset(sockTable, 0, sizeof(sockTable));
+    // UDP sockets
+    if (GetExtendedUdpTable(NULL, &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) == ERROR_INSUFFICIENT_BUFFER && size > 0) {
+        buf = malloc(size);
+        if (buf && GetExtendedUdpTable(buf, &size, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) == NO_ERROR) {
+            MIB_UDPTABLE_OWNER_PID *t = (MIB_UDPTABLE_OWNER_PID *)buf;
+            DWORD i;
+            for (i = 0; i < t->dwNumEntries; ++i) {
+                sockPut(17, t->table[i].dwLocalAddr, (uint16_t)t->table[i].dwLocalPort, t->table[i].dwOwningPid);
+            }
+        }
+        free(buf);
+    }
+    // TCP connections and listeners
+    size = 0;
+    if (GetExtendedTcpTable(NULL, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == ERROR_INSUFFICIENT_BUFFER && size > 0) {
+        buf = malloc(size);
+        if (buf && GetExtendedTcpTable(buf, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
+            MIB_TCPTABLE_OWNER_PID *t = (MIB_TCPTABLE_OWNER_PID *)buf;
+            DWORD i;
+            for (i = 0; i < t->dwNumEntries; ++i) {
+                sockPut(6, t->table[i].dwLocalAddr, (uint16_t)t->table[i].dwLocalPort, t->table[i].dwOwningPid);
+            }
+        }
+        free(buf);
+    }
+    sockRefreshedUs = now;
+}
+
+// raw (non-canonical) endpoints of an IPv4 packet, read alignment-safely
+static int parseV4Endpoints(const void *packet, UINT len, uint8_t *proto,
+                            uint32_t *src, uint16_t *sp, uint32_t *dst, uint16_t *dp) {
+    PWINDIVERT_IPHDR ip = NULL;
+    PWINDIVERT_TCPHDR tcp = NULL;
+    PWINDIVERT_UDPHDR udp = NULL;
+    const unsigned char *h;
+    WinDivertHelperParsePacket(packet, len, &ip, NULL, proto, NULL, NULL, &tcp, &udp, NULL, NULL, NULL, NULL);
+    if (ip == NULL) return 0;
+    h = (const unsigned char *)ip;
+    memcpy(src, h + offsetof(WINDIVERT_IPHDR, SrcAddr), 4);
+    memcpy(dst, h + offsetof(WINDIVERT_IPHDR, DstAddr), 4);
+    *sp = *dp = 0;
+    if (tcp) {
+        h = (const unsigned char *)tcp;
+        memcpy(sp, h + offsetof(WINDIVERT_TCPHDR, SrcPort), 2);
+        memcpy(dp, h + offsetof(WINDIVERT_TCPHDR, DstPort), 2);
+        *proto = 6;
+    } else if (udp) {
+        h = (const unsigned char *)udp;
+        memcpy(sp, h + offsetof(WINDIVERT_UDPHDR, SrcPort), 2);
+        memcpy(dp, h + offsetof(WINDIVERT_UDPHDR, DstPort), 2);
+        *proto = 17;
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+uint32_t procflowLookup(const void *packet, UINT len, int outbound) {
     FlowKey k;
     uint32_t pid;
+    uint8_t proto;
+    uint32_t src, dst, local;
+    uint16_t sp, dp, lport;
+    int64_t now;
     if (flowState != 1 || !flowKeyFromPacket(&k, packet, len)) return 0;
     EnterCriticalSection(&lock);
     pid = flowTableGet(&table, &k);
     LeaveCriticalSection(&lock);
+    if (pid) return pid;
+
+    // not learned from the flow layer: look the local endpoint up in the OS tables
+    if (!parseV4Endpoints(packet, len, &proto, &src, &sp, &dst, &dp)) return 0;
+    local = outbound ? src : dst;
+    lport = outbound ? sp : dp;
+    now = clockNowUs();
+    if (now - sockRefreshedUs > SOCK_REFRESH_US) {
+        sockRefresh(now);
+    }
+    pid = sockGet(proto, local, lport);
+    if (pid == 0) pid = sockGet(proto, 0, lport);          // socket bound to any address
+    if (pid) {
+        // remember it so later packets of this connection are a fast hit
+        EnterCriticalSection(&lock);
+        flowTableSet(&table, &k, pid, now);
+        LeaveCriticalSection(&lock);
+    }
     return pid;
 }
 

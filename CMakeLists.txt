@@ -45,7 +45,7 @@ target_compile_definitions(clumsy PRIVATE $<$<CONFIG:Debug>:_DEBUG> $<$<NOT:$<CO
 target_link_directories(clumsy PRIVATE "${IUP_DIR}" "${WD_DIR}")
 target_link_libraries(clumsy PRIVATE
     iup WinDivert
-    comctl32 winmm ws2_32 kernel32 gdi32 comdlg32 uuid ole32 psapi advapi32 shell32 user32)
+    comctl32 winmm ws2_32 kernel32 gdi32 comdlg32 uuid ole32 psapi advapi32 shell32 user32 iphlpapi)
 
 # the .rc already embeds the manifest, so stop the linker adding its own
 set_target_properties(clumsy PROPERTIES

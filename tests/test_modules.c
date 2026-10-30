@@ -849,7 +849,7 @@ static void testProcflow(void) {
         CHECK(flowKeyEqual(&kp, &ke));
         flowTableSet(&t, &ke, 999, T0);
         CHECK_EQ(flowTableGet(&t, &kp), 999);        // packet finds the learned flow
-        CHECK_EQ(procflowLookup(out->packet, out->packetLen), 0);  // subsystem not running -> 0
+        CHECK_EQ(procflowLookup(out->packet, out->packetLen, 1), 0);  // subsystem not running -> 0
     }
     packetFree(out);
     flowTableFree(&t);

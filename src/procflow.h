@@ -47,5 +47,8 @@ int processNameMatch(const char *filter, const char *exePath);
 int  procflowStart(char *err, size_t errSize);
 void procflowStop(void);
 int  procflowRunning(void);
-uint32_t procflowLookup(const void *packet, UINT len);   // pid or 0
+// pid owning the packet's connection, or 0. Tries the flow-layer table first,
+// then falls back to the OS socket tables keyed by the packet's LOCAL endpoint,
+// which is why the direction is needed (outbound: local = source).
+uint32_t procflowLookup(const void *packet, UINT len, int outbound);
 int  procflowName(uint32_t pid, char *buf, size_t size);  // base exe name
