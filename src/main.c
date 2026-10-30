@@ -31,11 +31,20 @@ BOOL parameterized = 0;
 
 static Ihandle *dialog, *startButton, *stateIcon, *statusLabel, *tabs, *presetList;
 static Ihandle *addRuleButton, *removeRuleButton, *advancedToggle, *timer, *timeoutTimer;
-static Ihandle *profileList, *saveButton, *loadButton;
+static Ihandle *profileList, *saveButton, *loadButton, *statsButton;
 static Ihandle *scenarioButton, *scenarioLoadButton, *scenarioLabel, *scenarioTimer;
 static Scenario scenario;
 static int scenarioLoaded = 0, scenarioPlaying = 0;
 static void uiAddRuleTab(Rule *r);
+
+// ---- live statistics ----
+#define STATS_SAMPLES 180
+static Ihandle *statsDialog = NULL, *statsCanvas, *statsText, *statsTimer;
+static int statsOpen = 0;
+static float sampleSent[STATS_SAMPLES], sampleDrop[STATS_SAMPLES];
+static int sampleHead = 0, sampleCount = 0;
+static LONG64 statsPrevSent, statsPrevDrop, statsPrevCap;
+static int64_t statsPrevUs;
 static int dialogMapped = 0;
 static int ruleSerial = 1;
 static LONG64 lastSent = 0, lastFailed = 0;
@@ -463,6 +472,187 @@ static int uiScenarioPlayCb(Ihandle *ih) {
     return IUP_DEFAULT;
 }
 
+static int statsCanvasCb(Ihandle *canvas) {
+    int w = 0, h = 0, i;
+    float maxv = 1.0f;
+    IupDrawBegin(canvas);
+    IupDrawGetSize(canvas, &w, &h);
+    IupSetAttribute(canvas, "DRAWCOLOR", "32 32 32");
+    IupDrawRectangle(canvas, 0, 0, w, h);
+    // grid baseline
+    IupSetAttribute(canvas, "DRAWCOLOR", "64 64 64");
+    IupDrawLine(canvas, 0, h - 1, w, h - 1);
+    for (i = 0; i < sampleCount; ++i) {
+        int idx = (sampleHead - sampleCount + i + 2 * STATS_SAMPLES) % STATS_SAMPLES;
+        if (sampleSent[idx] > maxv) maxv = sampleSent[idx];
+        if (sampleDrop[idx] > maxv) maxv = sampleDrop[idx];
+    }
+    // draw sent (green) and dropped (red) as rolling lines
+    for (i = 1; i < sampleCount; ++i) {
+        int a = (sampleHead - sampleCount + i - 1 + 2 * STATS_SAMPLES) % STATS_SAMPLES;
+        int b = (sampleHead - sampleCount + i + 2 * STATS_SAMPLES) % STATS_SAMPLES;
+        int x0 = (i - 1) * w / STATS_SAMPLES, x1 = i * w / STATS_SAMPLES;
+        int ys0 = h - 1 - (int)(sampleSent[a] / maxv * (h - 4));
+        int ys1 = h - 1 - (int)(sampleSent[b] / maxv * (h - 4));
+        int yd0 = h - 1 - (int)(sampleDrop[a] / maxv * (h - 4));
+        int yd1 = h - 1 - (int)(sampleDrop[b] / maxv * (h - 4));
+        IupSetAttribute(canvas, "DRAWCOLOR", "109 170 44");
+        IupDrawLine(canvas, x0, ys0, x1, ys1);
+        IupSetAttribute(canvas, "DRAWCOLOR", "208 70 72");
+        IupDrawLine(canvas, x0, yd0, x1, yd1);
+    }
+    IupDrawEnd(canvas);
+    return IUP_DEFAULT;
+}
+
+static void statsSample(void) {
+    int64_t now = clockNowUs();
+    double dt = statsPrevUs ? (double)(now - statsPrevUs) / 1000000.0 : 0.0;
+    LONG64 sent = atomicLoad64(&engineStats.sent);
+    LONG64 cap = atomicLoad64(&engineStats.captured);
+    LONG64 drop = 0;
+    int i;
+    for (i = 0; i < ruleSet.count; ++i) {
+        int j;
+        for (j = 0; j < ruleSet.rules[i]->moduleCount; ++j)
+            drop += atomicLoad64(&ruleSet.rules[i]->modules[j]->stats.dropped);
+    }
+    if (dt > 0.01) {
+        float sRate = (float)((double)(sent - statsPrevSent) / dt);
+        float dRate = (float)((double)(drop - statsPrevDrop) / dt);
+        if (sRate < 0) sRate = 0;
+        if (dRate < 0) dRate = 0;
+        sampleSent[sampleHead] = sRate;
+        sampleDrop[sampleHead] = dRate;
+        sampleHead = (sampleHead + 1) % STATS_SAMPLES;
+        if (sampleCount < STATS_SAMPLES) ++sampleCount;
+    }
+    statsPrevSent = sent;
+    statsPrevDrop = drop;
+    statsPrevCap = cap;
+    statsPrevUs = now;
+}
+
+static void statsRefreshText(void) {
+    char buf[1024];
+    LONG64 cap = atomicLoad64(&engineStats.captured);
+    LONG64 sent = atomicLoad64(&engineStats.sent);
+    LONG64 pass = atomicLoad64(&engineStats.passthrough);
+    LONG64 sfail = atomicLoad64(&engineStats.sendFailed);
+    LONG64 allocf = atomicLoad64(&engineStats.allocFailed);
+    LONG64 lsum = atomicLoad64(&engineStats.latencySumUs);
+    LONG64 lcnt = atomicLoad64(&engineStats.latencySamples);
+    LONG ringNow = atomicLoad32(&engineStats.ringDepth);
+    LONG ringMax = atomicLoad32(&engineStats.ringDepthMax);
+    LONG64 lateWk = atomicLoad64(&engineStats.lateWakeups);
+    double avgMs = lcnt ? (double)lsum / (double)lcnt / 1000.0 : 0.0;
+    int n = snprintf(buf, sizeof(buf),
+        "engine %s   high-res timer: %s\n"
+        "captured: %lld   sent: %lld   passed through: %lld\n"
+        "send failures: %lld   alloc failures: %lld   late wakeups: %lld\n"
+        "added latency avg: %.2f ms (%lld samples)\n"
+        "ring depth now/max: %ld / %ld\n\n"
+        "per module (rule: module  packets/dropped/queued):\n",
+        engineIsRunning() ? "running" : "stopped",
+        engineHighResolutionTimer() ? "yes" : "no",
+        cap, sent, pass, sfail, allocf, lateWk, avgMs, lcnt, ringNow, ringMax);
+    {
+        int i, j;
+        for (i = 0; i < ruleSet.count && n < (int)sizeof(buf) - 1; ++i) {
+            Rule *r = ruleSet.rules[i];
+            for (j = 0; j < r->moduleCount && n < (int)sizeof(buf) - 1; ++j) {
+                ModuleInst *m = r->modules[j];
+                LONG64 pk = atomicLoad64(&m->stats.packets);
+                if (!pk && !m->enabled) continue;
+                n += snprintf(buf + n, sizeof(buf) - n, "  %s: %-10s %lld / %lld / %ld\n",
+                              r->name, m->desc->shortName, pk,
+                              atomicLoad64(&m->stats.dropped), atomicLoad32(&m->stats.queued));
+            }
+        }
+    }
+    IupSetStrAttribute(statsText, "VALUE", buf);
+}
+
+static int statsTimerCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    if (!statsOpen) return IUP_DEFAULT;
+    statsSample();
+    statsRefreshText();
+    IupRedraw(statsCanvas, 0);
+    return IUP_DEFAULT;
+}
+
+static int statsCloseCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    statsOpen = 0;
+    IupSetAttribute(statsTimer, "RUN", "NO");
+    return IUP_DEFAULT;
+}
+
+static int uiStatsCsvCb(Ihandle *ih) {
+    Ihandle *dlg = IupFileDlg();
+    UNREFERENCED_PARAMETER(ih);
+    IupSetAttribute(dlg, "DIALOGTYPE", "SAVE");
+    IupSetAttribute(dlg, "TITLE", "Export statistics (CSV)");
+    IupSetAttribute(dlg, "EXTFILTER", "CSV|*.csv|All files|*.*|");
+    IupSetAttribute(dlg, "FILE", "clumsy-stats.csv");
+    IupPopup(dlg, IUP_CURRENT, IUP_CURRENT);
+    if (IupGetInt(dlg, "STATUS") != -1) {
+        const char *path = IupGetAttribute(dlg, "VALUE");
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            int i;
+            fputs("sample,sent_per_s,dropped_per_s\n", f);
+            for (i = 0; i < sampleCount; ++i) {
+                int idx = (sampleHead - sampleCount + i + 2 * STATS_SAMPLES) % STATS_SAMPLES;
+                fprintf(f, "%d,%.1f,%.1f\n", i, sampleSent[idx], sampleDrop[idx]);
+            }
+            fclose(f);
+            showStatus("Exported statistics CSV.");
+        } else {
+            showStatus("Could not write CSV.");
+        }
+    }
+    IupDestroy(dlg);
+    return IUP_DEFAULT;
+}
+
+static int uiStatsCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    if (statsDialog == NULL) {
+        Ihandle *csvButton, *vbox;
+        statsCanvas = IupCanvas(NULL);
+        IupSetAttribute(statsCanvas, "RASTERSIZE", "520x140");
+        IupSetAttribute(statsCanvas, "EXPAND", "HORIZONTAL");
+        IupSetCallback(statsCanvas, "ACTION", (Icallback)statsCanvasCb);
+        statsText = IupText(NULL);
+        IupSetAttribute(statsText, "MULTILINE", "YES");
+        IupSetAttribute(statsText, "READONLY", "YES");
+        IupSetAttribute(statsText, "EXPAND", "YES");
+        IupSetAttribute(statsText, "VISIBLELINES", "14");
+        IupSetAttribute(statsText, "VISIBLECOLUMNS", "52");
+        IupSetAttribute(statsText, "FONT", "Courier, 9");
+        csvButton = IupButton("Export CSV", NULL);
+        IupSetCallback(csvButton, "ACTION", uiStatsCsvCb);
+        vbox = IupVbox(
+            IupLabel("Throughput: sent (green) and dropped (red) per second"),
+            statsCanvas, statsText, csvButton, NULL);
+        IupSetAttribute(vbox, "NCMARGIN", "6x6");
+        IupSetAttribute(vbox, "NCGAP", "4x4");
+        statsDialog = IupDialog(vbox);
+        IupSetAttribute(statsDialog, "TITLE", "clumsy statistics");
+        IupSetAttribute(statsDialog, "SIZE", "QUARTER");
+        IupSetCallback(statsDialog, "CLOSE_CB", statsCloseCb);
+    }
+    statsOpen = 1;
+    statsPrevUs = 0;
+    statsPrevSent = statsPrevDrop = statsPrevCap = 0;
+    sampleHead = sampleCount = 0;
+    IupSetAttribute(statsTimer, "RUN", "YES");
+    IupShow(statsDialog);
+    return IUP_DEFAULT;
+}
+
 // rebuild every rule tab from the current rule set (after a config load)
 static void rebuildTabs(void) {
     Ihandle *child;
@@ -784,10 +974,13 @@ static void init(int argc, char *argv[]) {
     loadButton = IupButton("Load", NULL);
     IupSetAttribute(loadButton, "PADDING", "4x");
     IupSetCallback(loadButton, "ACTION", uiLoadCb);
+    statsButton = IupButton("Stats", NULL);
+    IupSetAttribute(statsButton, "PADDING", "4x");
+    IupSetCallback(statsButton, "ACTION", uiStatsCb);
 
     controlHbox = IupHbox(stateIcon, startButton, IupFill(),
                           IupLabel("Profile:"), profileList,
-                          saveButton, loadButton, addRuleButton, removeRuleButton, advancedToggle, NULL);
+                          saveButton, loadButton, statsButton, addRuleButton, removeRuleButton, advancedToggle, NULL);
     IupSetAttribute(controlHbox, "ALIGNMENT", "ACENTER");
     IupSetAttribute(controlHbox, "GAP", "4");
     IupSetAttribute(controlHbox, "NCMARGIN", "4x4");
@@ -835,6 +1028,10 @@ static void init(int argc, char *argv[]) {
     scenarioTimer = IupTimer();
     IupSetAttribute(scenarioTimer, "TIME", "100");
     IupSetCallback(scenarioTimer, "ACTION_CB", uiScenarioTickCb);
+
+    statsTimer = IupTimer();
+    IupSetAttribute(statsTimer, "TIME", "250");
+    IupSetCallback(statsTimer, "ACTION_CB", statsTimerCb);
 
     argValue = IupGetGlobal("timeout");
     if (argValue != NULL) {
@@ -908,6 +1105,8 @@ int main(int argc, char *argv[]) {
     }
     IupDestroy(timer);
     if (scenarioTimer) IupDestroy(scenarioTimer);
+    if (statsTimer) IupDestroy(statsTimer);
+    if (statsDialog) IupDestroy(statsDialog);
     if (timeoutTimer) IupDestroy(timeoutTimer);
     IupClose();
     endTimePeriod();
