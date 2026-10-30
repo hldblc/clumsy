@@ -3,9 +3,10 @@
 
 extern const ModuleDesc lagModuleDesc, dropModuleDesc, throttleModuleDesc, dupModuleDesc,
     oodModuleDesc, tamperModuleDesc, resetModuleDesc, bandwidthModuleDesc,
-    tcpModuleDesc, outageModuleDesc;
+    tcpModuleDesc, outageModuleDesc, fragmentModuleDesc;
 
 // Processing order: a packet walks this chain from first to last.
+// Fragment runs last so earlier modules act on whole packets.
 const ModuleDesc *const moduleDescs[] = {
     &outageModuleDesc,
     &lagModuleDesc,
@@ -17,6 +18,7 @@ const ModuleDesc *const moduleDescs[] = {
     &tamperModuleDesc,
     &resetModuleDesc,
     &bandwidthModuleDesc,
+    &fragmentModuleDesc,
 };
 const int moduleDescCount = (int)(sizeof(moduleDescs) / sizeof(moduleDescs[0]));
 

@@ -622,6 +622,98 @@ static void testTcp(void) {
     ruleDestroy(r);
 }
 
+// ---- fragment ----
+static int fragInfo(PacketNode *n, UINT *offUnits, int *mf, UINT *totalLen) {
+    PWINDIVERT_IPHDR ip = NULL;
+    UINT16 f;
+    WinDivertHelperParsePacket(n->packet, n->packetLen, &ip, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    if (ip == NULL) return 0;
+    f = WinDivertHelperNtohs(ip->FragOff0);
+    *offUnits = f & 0x1FFF;
+    *mf = (f >> 13) & 1;
+    *totalLen = WinDivertHelperNtohs(ip->Length);
+    return 1;
+}
+
+static void testFragment(void) {
+    Rule *r = ruleCreate("t", "udp");
+    ModuleInst *fr = ruleFindModule(r, "fragment");
+    PacketList l;
+    PacketNode *n;
+    int i, pieces, mf, lastMf = 1;
+    UINT off, total, prevEnd, reassembled, origPayload;
+    unsigned char expect[2000], got[2000];
+    listInit(&l);
+    CHECK(fr != NULL);
+    CHECK(moduleSetParamText(fr, "mtu", "200"));
+    // 1500 byte payload UDP packet -> 20 IP + 8 UDP + 1500 = 1528 total
+    n = mkUdp(5000, 6000, 1500, 1);
+    origPayload = n->packetLen - 20;              // everything after the IP header
+    memcpy(expect, n->packet + 20, origPayload);
+    listPushBack(&l, n);
+    runStep(fr, &l, T0);
+    pieces = listCount(&l);
+    CHECK(pieces >= 8);                            // 1508 payload / (200-20=180 -> 176) ~ 9 pieces
+    // fragments are in order, offsets contiguous, only the last has MF clear,
+    // and reassembling their payloads reproduces the original
+    prevEnd = 0;
+    reassembled = 0;
+    for (n = listFirst(&l), i = 0; n; n = listNext(&l, n), ++i) {
+        UINT hlen;
+        PWINDIVERT_IPHDR ip = NULL;
+        CHECK(fragInfo(n, &off, &mf, &total));
+        CHECK((n->flags & PN_FLAG_FRAGMENT) != 0);
+        CHECK_EQ(off * 8, prevEnd);               // contiguous
+        WinDivertHelperParsePacket(n->packet, n->packetLen, &ip, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+        hlen = ip->HdrLength * 4;
+        CHECK_EQ(total, n->packetLen);
+        CHECK(n->packetLen <= 200);
+        memcpy(got + reassembled, n->packet + hlen, n->packetLen - hlen);
+        reassembled += n->packetLen - hlen;
+        prevEnd = off * 8 + (n->packetLen - hlen);
+        lastMf = mf;
+    }
+    CHECK_EQ(lastMf, 0);                           // last fragment clears MF
+    CHECK_EQ(reassembled, origPayload);
+    CHECK(memcmp(expect, got, origPayload) == 0);  // payload preserved
+    CHECK_EQ(fr->stats.packets, 1);
+    listFreeAll(&l);
+
+    // packets at or below the MTU pass untouched
+    CHECK(moduleSetParamText(fr, "mtu", "1500"));
+    n = mkUdp(1, 2, 100, 1);
+    listPushBack(&l, n);
+    runStep(fr, &l, T0);
+    CHECK_EQ(listCount(&l), 1);
+    CHECK(((listFirst(&l))->flags & PN_FLAG_FRAGMENT) == 0);
+    listFreeAll(&l);
+
+    // lose-a-fragment: one piece is missing, so reassembly would fail
+    CHECK(moduleSetParamText(fr, "mtu", "200"));
+    CHECK(moduleSetParamText(fr, "lose", "100"));
+    n = mkUdp(7, 8, 1500, 1);
+    listPushBack(&l, n);
+    runStep(fr, &l, T0);
+    CHECK(fr->stats.dropped >= 1);
+    {
+        // offsets are no longer fully contiguous (a hole exists)
+        int hole = 0;
+        prevEnd = 0;
+        for (n = listFirst(&l); n; n = listNext(&l, n)) {
+            PWINDIVERT_IPHDR ip = NULL;
+            UINT hlen;
+            fragInfo(n, &off, &mf, &total);
+            if (off * 8 != prevEnd) hole = 1;
+            WinDivertHelperParsePacket(n->packet, n->packetLen, &ip, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+            hlen = ip->HdrLength * 4;
+            prevEnd = off * 8 + (n->packetLen - hlen);
+        }
+        CHECK(hole);
+    }
+    listFreeAll(&l);
+    ruleDestroy(r);
+}
+
 // ---- outage ----
 static void testOutage(void) {
     Rule *r = ruleCreate("t", "udp");
@@ -709,6 +801,7 @@ void testModules(void) {
     testTamper();
     testTcp();
     testOutage();
+    testFragment();
     testFlowScope();
     testRules();
 }

@@ -20,7 +20,7 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [ ] 8. Richer corruption modes: bit flips, truncate, zero-fill, header/payload, checksum policy
 - [x] 10. TCP-aware impairments: SYN drop, pure-ACK drop, retransmit delay, window clamp, SYN option strip
 - [x] 11. Outages and link flapping (periodic or random, silent drop while down)
-- [ ] 9. Fragmentation and MTU stress
+- [x] 9. Fragmentation and MTU stress (IPv4 split into fragments, optional fragment loss)
 
 ## Targeting and automation
 
