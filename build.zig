@@ -13,6 +13,7 @@ const windows_kits_base = "C:/Program Files (x86)/Windows Kits/10/bin";
 // Application sources. main.c holds the UI entry point.
 const app_sources = [_][]const u8{
     "src/bandwidth.c",
+    "src/cli.c",
     "src/clock.c",
     "src/config.c",
     "src/drop.c",

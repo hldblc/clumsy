@@ -27,7 +27,7 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [x] 14. Live filter validation (as-you-type valid/invalid indicator) and a Build... filter builder
 - [~] 15. Hostname/CIDR targets (CIDR can be written directly in filters; hostname resolution pending)
 - [x] 13. Per-process filtering via the WinDivert flow layer (Process field per rule)
-- [ ] 17. Real command line: help, validation, profiles, scenarios, seed, headless
+- [x] 17. Real command line: --help/--version/--list, --seed, --load, --profile, --start, --headless, plus classic --module-param
 - [x] 6. Link profiles (3G, LTE, satellite, DSL bufferbloat, lossy Wi-Fi, flapping, ...) applied to the current rule
 - [x] 19. Saved sessions and shareable configs (Save/Load to .clumsy INI-style files)
 - [ ] 7. Scripted scenarios on a timeline

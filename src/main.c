@@ -11,6 +11,7 @@
 #include "uibind.h"
 #include "config.h"
 #include "profiles.h"
+#include "cli.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -34,6 +35,9 @@ static void uiAddRuleTab(Rule *r);
 static int dialogMapped = 0;
 static int ruleSerial = 1;
 static LONG64 lastSent = 0, lastFailed = 0;
+static int startOnShow = 0;     // auto-start filtering when the window shows
+static int headlessMode = 0;    // run without a visible window
+static int headlessStop = 0;
 
 static int uiStartCb(Ihandle *ih);
 static int uiStopCb(Ihandle *ih);
@@ -582,8 +586,8 @@ static int uiOnDialogShow(Ihandle *ih, int state) {
     }
 
     exit = tryElevate(hWnd, parameterized);
-    if (!exit && parameterized) {
-        LOG("parameterized, start filtering immediately");
+    if (!exit && startOnShow) {
+        LOG("auto-start requested, begin filtering");
         uiStartCb(startButton);
     }
     return exit ? IUP_CLOSE : IUP_DEFAULT;
@@ -591,14 +595,14 @@ static int uiOnDialogShow(Ihandle *ih, int state) {
 
 static void init(int argc, char *argv[]) {
     Ihandle *topFrame, *controlHbox, *dialogVBox, *noneIcon, *doingIcon, *errorIcon, *presetLabel;
-    Rule *first;
     UINT ix;
     char *argValue;
+
+    CliOptions opt;
 
     loadConfig();
     IupOpen(&argc, &argv);
     uiInstallHooks();
-    configRebuildUiHook = rebuildTabs;
 
     LOG("argc: %d", argc);
     if (argc > 1) {
@@ -607,6 +611,28 @@ static void init(int argc, char *argv[]) {
             exit(-1);
         }
         parameterized = 1;
+    }
+
+    cliReadOptions(&opt);
+    if (opt.haveSeed) rngSeed(opt.seed);
+    headlessMode = opt.headless;
+    startOnShow = parameterized || opt.autostart;
+    if (opt.loadPath) {
+        char err[MSG_BUFSIZE];
+        if (!configLoad(opt.loadPath, err, sizeof(err))) {   // hook not set yet: no UI rebuild
+            LOG("--load failed: %s", err);
+        }
+    }
+    if (ruleSet.count == 0) {
+        ruleSetAdd(ruleCreate("Rule 1", filters[0].filterValue));
+    }
+    if (opt.profile) {
+        int pi, found = -1;
+        for (pi = 0; pi < profileCount(); ++pi) {
+            if (strieq(profileName(pi), opt.profile)) { found = pi; break; }
+        }
+        if (found >= 0) configApplyFragment(ruleSet.rules[0], profileText(found));
+        else LOG("unknown profile: %s", opt.profile);
     }
 
     statusLabel = IupLabel("NOTICE: When capturing localhost (loopback) packets, you CAN'T include inbound criteria.\n"
@@ -686,9 +712,9 @@ static void init(int argc, char *argv[]) {
     tabs = IupTabs(NULL);
     IupSetAttribute(tabs, "EXPAND", "YES");
 
-    first = ruleCreate("Rule 1", filters[0].filterValue);
-    ruleSetAdd(first);
-    uiAddRuleTab(first);
+    for (ix = 0; ix < (UINT)ruleSet.count; ++ix) {
+        uiAddRuleTab(ruleSet.rules[ix]);
+    }
 
     dialog = IupDialog(
         dialogVBox = IupVbox(
@@ -723,9 +749,46 @@ static void init(int argc, char *argv[]) {
     if (parameterized) {
         applyLegacyArgs();
     }
+    configRebuildUiHook = rebuildTabs;   // enable UI rebuilds now the dialog exists
+}
+
+// headless: never show the window. Elevate silently (must already be admin),
+// start filtering, and pump the IUP loop so timers run until timeout or kill.
+static int headlessTimeoutCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    headlessStop = 1;
+    return IUP_CLOSE;
+}
+
+static void runHeadless(void) {
+    char err[MSG_BUFSIZE];
+    char *to;
+    if (tryElevate(NULL, TRUE)) {
+        LOG("headless requires running as Administrator");
+        return;
+    }
+    if (!engineStart(err, sizeof(err))) {
+        LOG("headless start failed: %s", err);
+        return;
+    }
+    to = IupGetGlobal("timeout");
+    if (to) {
+        char ms[16];
+        Ihandle *t = IupTimer();
+        snprintf(ms, sizeof(ms), "%s000", to);
+        IupStoreAttribute(t, "TIME", ms);
+        IupSetCallback(t, "ACTION_CB", headlessTimeoutCb);
+        IupSetAttribute(t, "RUN", "YES");
+    }
+    LOG("headless running");
+    while (!headlessStop && IupLoopStepWait() != IUP_CLOSE) {
+        /* pump timers and the engine's UI-thread work */
+    }
+    engineStop();
 }
 
 int main(int argc, char *argv[]) {
+    cliMaybeExit(argc, argv);   // --help / --version / --list exit here
     clockInit();
     packetPoolInit();
     rngSeed(0);
@@ -733,8 +796,12 @@ int main(int argc, char *argv[]) {
     LOG("Is Elevated: %d", IsElevated());
     init(argc, argv);
 
-    IupShowXY(dialog, IUP_CENTER, IUP_CENTER);
-    IupMainLoop();
+    if (headlessMode) {
+        runHeadless();
+    } else {
+        IupShowXY(dialog, IUP_CENTER, IUP_CENTER);
+        IupMainLoop();
+    }
 
     if (engineIsRunning()) {
         engineStop();
