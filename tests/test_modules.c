@@ -11,6 +11,7 @@
 #include "profiles.h"
 #include "scenario.h"
 #include "pcap.h"
+#include "remote.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -1069,6 +1070,48 @@ static void testPcap(void) {
     CHECK_EQ(pcapBuildPacketBlock(buf, 8, buf, 40, 0, "x"), 0u);
 }
 
+// ---- remote API (JSON + command apply, no sockets) ----
+static void testRemote(void) {
+    static char buf[CONFIG_TEXT_MAX];
+    char val[48];
+    Rule *r;
+    ModuleInst *lag, *drop;
+    ruleSetClear();
+    r = ruleCreate("Game", "udp and outbound");
+    snprintf(r->process, sizeof(r->process), "game.exe");
+    ruleSetAdd(r);
+
+    CHECK(remoteBuildStatus(buf, sizeof(buf)) > 0);
+    CHECK(strstr(buf, "\"running\":false") != NULL);
+    CHECK(strstr(buf, "\"ruleCount\":1") != NULL);
+
+    CHECK(remoteBuildRules(buf, sizeof(buf)) > 0);
+    CHECK(strstr(buf, "\"name\":\"Game\"") != NULL);
+    CHECK(strstr(buf, "\"process\":\"game.exe\"") != NULL);
+    CHECK(strstr(buf, "\"lag\"") != NULL);
+
+    // commands apply to the rule set
+    remoteApplyCommand("set 0 lag time 123");
+    lag = ruleFindModule(ruleSet.rules[0], "lag");
+    CHECK(moduleGetParamText(lag, "time", val, sizeof(val)));
+    CHECK(strcmp(val, "123") == 0);
+    remoteApplyCommand("set 0 lag time 20/80");
+    CHECK(moduleGetParamText(lag, "time", val, sizeof(val)));
+    CHECK(strcmp(val, "20/80") == 0);
+    remoteApplyCommand("enable 0 drop 1");
+    drop = ruleFindModule(ruleSet.rules[0], "drop");
+    CHECK(drop->enabled);
+    remoteApplyCommand("enable 0 drop 0");
+    CHECK(!drop->enabled);
+    remoteApplyCommand("profile 3G");
+    CHECK(ruleFindModule(ruleSet.rules[0], "lag")->enabled);
+    // malformed commands are ignored, not crashing
+    remoteApplyCommand("set 9 lag time 1");
+    remoteApplyCommand("garbage");
+    remoteApplyCommand("set 0 nosuch time 1");
+    ruleSetClear();
+}
+
 void testModules(void) {
     rngSeed(777);
     testLagFixed();
@@ -1088,4 +1131,5 @@ void testModules(void) {
     testConfig();
     testScenario();
     testPcap();
+    testRemote();
 }

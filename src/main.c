@@ -16,6 +16,7 @@
 #include "pcap.h"
 #include "winui.h"
 #include "safety.h"
+#include "remote.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -887,6 +888,23 @@ static void cbQuit(void) {
     IupExitLoop();
 }
 
+// remote API commands arrive here on the UI thread via IupPostMessage
+static int remotePostCb(Ihandle *ih, char *s, int i, double d, void *p) {
+    UNREFERENCED_PARAMETER(ih);
+    UNREFERENCED_PARAMETER(i);
+    UNREFERENCED_PARAMETER(d);
+    UNREFERENCED_PARAMETER(p);
+    if (s == NULL) return IUP_DEFAULT;
+    if (strieq(s, "start")) cbStart();
+    else if (strieq(s, "stop")) cbStop();
+    else remoteApplyCommand(s);
+    return IUP_DEFAULT;
+}
+
+static void remoteEnqueueToUi(const char *cmd) {
+    if (dialog) IupPostMessage(dialog, cmd, 0, 0.0, NULL);
+}
+
 static int uiDiagnoseCb(Ihandle *ih) {
     char msg[MSG_BUFSIZE];
     UNREFERENCED_PARAMETER(ih);
@@ -1172,6 +1190,25 @@ static void init(int argc, char *argv[]) {
         applyLegacyArgs();
     }
     configRebuildUiHook = rebuildTabs;   // enable UI rebuilds now the dialog exists
+
+    if (opt.api) {
+        static char token[24];
+        char err[MSG_BUFSIZE];
+        IupSetCallback(dialog, "POSTMESSAGE_CB", (Icallback)remotePostCb);
+        if (opt.apiToken && opt.apiToken[0]) {
+            snprintf(token, sizeof(token), "%s", opt.apiToken);
+        } else {
+            snprintf(token, sizeof(token), "%08x%08x", (unsigned)rngNext(), (unsigned)rngNext());
+        }
+        if (remoteStart(opt.apiPort, token, remoteEnqueueToUi, err, sizeof(err))) {
+            char msg[MSG_BUFSIZE];
+            snprintf(msg, sizeof(msg), "Remote API on http://127.0.0.1:%d  token: %s", opt.apiPort, token);
+            LOG("%s", msg);
+            showStatus(msg);
+        } else {
+            LOG("remote API failed: %s", err);
+        }
+    }
 }
 
 // headless: never show the window. Elevate silently (must already be admin),
@@ -1226,6 +1263,9 @@ int main(int argc, char *argv[]) {
     }
 
     winuiShutdown();
+    if (remoteRunning()) {
+        remoteStop();
+    }
     if (engineIsRunning()) {
         engineStop();
     }

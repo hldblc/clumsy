@@ -10,6 +10,9 @@ typedef struct {
     uint64_t seed;
     const char *loadPath; // --load <file>, or NULL
     const char *profile;  // --profile <name>, or NULL
+    int api;              // --api on: start the remote control API
+    int apiPort;          // --api-port <n>, default 8998
+    const char *apiToken; // --api-token <t>, or NULL to auto-generate
 } CliOptions;
 
 // Handle --help/--version/--list and exit the process if one was given.

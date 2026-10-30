@@ -31,7 +31,7 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [x] 6. Link profiles (3G, LTE, satellite, DSL bufferbloat, lossy Wi-Fi, flapping, ...) applied to the current rule
 - [x] 19. Saved sessions and shareable configs (Save/Load to .clumsy INI-style files)
 - [x] 7. Scripted scenarios on a timeline (Load/Play, progress, looping; etc/scenario-example.txt)
-- [ ] 18. Remote control API (local HTTP + JSON, token protected)
+- [x] 18. Remote control API (loopback HTTP+JSON, token-gated; --api on --api-port --api-token)
 - [x] 20. Global hotkeys (F5/F6/Ctrl+Alt+F12 panic) and minimize-to-tray with a menu
 
 ## Observability, safety and platform

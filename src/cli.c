@@ -52,7 +52,10 @@ static void buildUsage(char *buf, size_t size) {
     OUT("  --load <file.clumsy>   load a saved configuration\n");
     OUT("  --profile <name>       apply a link profile to the first rule\n");
     OUT("  --headless on          run without showing the window (must be elevated)\n");
-    OUT("  --start on             begin filtering on launch\n\n");
+    OUT("  --start on             begin filtering on launch\n");
+    OUT("  --api on               start the loopback control API (127.0.0.1)\n");
+    OUT("  --api-port <n>         API port (default 8998)\n");
+    OUT("  --api-token <t>        API token (auto-generated if omitted)\n\n");
     OUT("Single-rule shortcuts (the classic form):\n");
     OUT("  --filter \"<expr>\"      set the capture filter\n");
     OUT("  --<module> on|off      enable a module (e.g. --lag on)\n");
@@ -137,4 +140,10 @@ void cliReadOptions(CliOptions *opt) {
     if (v && (strieq(v, "on") || strieq(v, "1") || strieq(v, "yes"))) opt->autostart = 1;
     opt->loadPath = IupGetGlobal("load");
     opt->profile = IupGetGlobal("profile");
+    v = IupGetGlobal("api");
+    if (v && (strieq(v, "on") || strieq(v, "1") || strieq(v, "yes"))) opt->api = 1;
+    v = IupGetGlobal("api-port");
+    opt->apiPort = v ? atoi(v) : 8998;
+    if (opt->apiPort <= 0 || opt->apiPort > 65535) opt->apiPort = 8998;
+    opt->apiToken = IupGetGlobal("api-token");
 }

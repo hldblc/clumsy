@@ -30,6 +30,7 @@ const app_sources = [_][]const u8{
     "src/params.c",
     "src/pcap.c",
     "src/procflow.c",
+    "src/remote.c",
     "src/reset.c",
     "src/rng.c",
     "src/rules.c",
@@ -55,6 +56,7 @@ const test_sources = [_][]const u8{
     "src/profiles.c",
     "src/drop.c",
     "src/duplicate.c",
+    "src/engine.c",
     "src/fragment.c",
     "src/lag.c",
     "src/ood.c",
@@ -63,6 +65,7 @@ const test_sources = [_][]const u8{
     "src/params.c",
     "src/pcap.c",
     "src/procflow.c",
+    "src/remote.c",
     "src/reset.c",
     "src/rng.c",
     "src/rules.c",
@@ -275,6 +278,7 @@ pub fn build(b: *Builder) void {
     test_exe.linkSystemLibrary("Winmm");
     test_exe.linkSystemLibrary("psapi");
     test_exe.linkSystemLibrary("advapi32");
+    test_exe.linkSystemLibrary("ws2_32");
     test_exe.linkLibC();
     const run_tests = test_exe.run();
     run_tests.addPathDir(b.pathFromRoot(b.fmt("external/{s}/{s}", .{ windivert_dir, arch_tag })));
