@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches: [ "**" ]
+    tags: [ "v*" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch zig 0.9.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://ziglang.org/download/0.9.1/zig-windows-x86_64-0.9.1.zip"
+          $sha = "443da53387d6ae8ba6bac4b3b90e9fef4ecbe545e1c5fa3a89485c36f5c0e3a2"
+          Invoke-WebRequest -Uri $url -OutFile zig.zip
+          if ((Get-FileHash zig.zip -Algorithm SHA256).Hash -ne $sha.ToUpper()) { throw "zig checksum mismatch" }
+          Expand-Archive zig.zip -DestinationPath zig-dl
+          "$PWD\zig-dl\zig-windows-x86_64-0.9.1" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Unit tests
+        run: zig build test
+
+      - name: Build all shipping variants
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($arch in "x64", "x86") {
+            foreach ($sign in "A", "B", "C") {
+              Write-Host "building $arch $sign"
+              zig build -Dconf=Ship -Darch=$arch -Dsign=$sign
+              if ($LASTEXITCODE -ne 0) { throw "build failed for $arch $sign" }
+            }
+          }
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: clumsy-binaries
+          path: zig-out/**
+          if-no-files-found: error

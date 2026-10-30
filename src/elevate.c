@@ -4,6 +4,7 @@
 // http://code.msdn.microsoft.com/windowsdesktop/CppUACSelfElevation-981c0160
 #include <Windows.h>
 #include <VersionHelpers.h>
+#include <shellapi.h>
 #include "common.h"
 
 // 

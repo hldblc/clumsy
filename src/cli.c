@@ -40,40 +40,40 @@ static void outText(const char *text) {
 static void buildUsage(char *buf, size_t size) {
     size_t used = 0;
     int i, j;
-#define OUT(...) do { int w = snprintf(buf + used, size - used, __VA_ARGS__); if (w > 0 && (size_t)w < size - used) used += (size_t)w; } while (0)
-    OUT("clumsy %s - interactive network condition simulator\n\n", CLUMSY_VERSION);
-    OUT("Usage: clumsy [options]\n\n");
-    OUT("General:\n");
-    OUT("  --help                 show this help and exit\n");
-    OUT("  --version              show the version and exit\n");
-    OUT("  --list                 list modules, parameters and profiles\n");
-    OUT("  --seed <n>             fix the random seed for reproducible runs\n");
-    OUT("  --timeout <seconds>    auto-close after this long\n");
-    OUT("  --load <file.clumsy>   load a saved configuration\n");
-    OUT("  --profile <name>       apply a link profile to the first rule\n");
-    OUT("  --headless on          run without showing the window (must be elevated)\n");
-    OUT("  --start on             begin filtering on launch\n");
-    OUT("  --api on               start the loopback control API (127.0.0.1)\n");
-    OUT("  --api-port <n>         API port (default 8998)\n");
-    OUT("  --api-token <t>        API token (auto-generated if omitted)\n\n");
-    OUT("Single-rule shortcuts (the classic form):\n");
-    OUT("  --filter \"<expr>\"      set the capture filter\n");
-    OUT("  --<module> on|off      enable a module (e.g. --lag on)\n");
-    OUT("  --<module>-<param> <v> set a parameter (e.g. --lag-time 100, --drop-chance 5)\n");
-    OUT("                         per-direction values accept in/out, e.g. 20/80\n\n");
-    OUT("Example:\n");
-    OUT("  clumsy --filter \"udp and outbound\" --lag on --lag-time 100 --start on --timeout 30\n");
+#define EMIT(...) do { int w = snprintf(buf + used, size - used, __VA_ARGS__); if (w > 0 && (size_t)w < size - used) used += (size_t)w; } while (0)
+    EMIT("clumsy %s - interactive network condition simulator\n\n", CLUMSY_VERSION);
+    EMIT("Usage: clumsy [options]\n\n");
+    EMIT("General:\n");
+    EMIT("  --help                 show this help and exit\n");
+    EMIT("  --version              show the version and exit\n");
+    EMIT("  --list                 list modules, parameters and profiles\n");
+    EMIT("  --seed <n>             fix the random seed for reproducible runs\n");
+    EMIT("  --timeout <seconds>    auto-close after this long\n");
+    EMIT("  --load <file.clumsy>   load a saved configuration\n");
+    EMIT("  --profile <name>       apply a link profile to the first rule\n");
+    EMIT("  --headless on          run without showing the window (must be elevated)\n");
+    EMIT("  --start on             begin filtering on launch\n");
+    EMIT("  --api on               start the loopback control API (127.0.0.1)\n");
+    EMIT("  --api-port <n>         API port (default 8998)\n");
+    EMIT("  --api-token <t>        API token (auto-generated if omitted)\n\n");
+    EMIT("Single-rule shortcuts (the classic form):\n");
+    EMIT("  --filter \"<expr>\"      set the capture filter\n");
+    EMIT("  --<module> on|off      enable a module (e.g. --lag on)\n");
+    EMIT("  --<module>-<param> <v> set a parameter (e.g. --lag-time 100, --drop-chance 5)\n");
+    EMIT("                         per-direction values accept in/out, e.g. 20/80\n\n");
+    EMIT("Example:\n");
+    EMIT("  clumsy --filter \"udp and outbound\" --lag on --lag-time 100 --start on --timeout 30\n");
 #undef OUT
 }
 
 static void buildList(char *buf, size_t size) {
     size_t used = 0;
     int i, j, p;
-#define OUT(...) do { int w = snprintf(buf + used, size - used, __VA_ARGS__); if (w > 0 && (size_t)w < size - used) used += (size_t)w; } while (0)
-    OUT("Modules and parameters:\n");
+#define EMIT(...) do { int w = snprintf(buf + used, size - used, __VA_ARGS__); if (w > 0 && (size_t)w < size - used) used += (size_t)w; } while (0)
+    EMIT("Modules and parameters:\n");
     for (i = 0; i < moduleDescCount; ++i) {
         const ModuleDesc *d = moduleDescs[i];
-        OUT("  %-10s %s\n", d->shortName, d->displayName);
+        EMIT("  %-10s %s\n", d->shortName, d->displayName);
         for (j = 0; j < d->paramCount; ++j) {
             const ParamDesc *pd = &d->params[j];
             char range[64] = "";
@@ -91,13 +91,13 @@ static void buildList(char *buf, size_t size) {
             } else {
                 snprintf(range, sizeof(range), "%d..%d", pd->min, pd->max);
             }
-            OUT("      --%s-%-10s %s%s\n", d->shortName, pd->name, range,
+            EMIT("      --%s-%-10s %s%s\n", d->shortName, pd->name, range,
                 (pd->flags & PF_PERDIR) ? "  (per-direction, in/out)" : "");
         }
     }
-    OUT("\nProfiles (--profile <name>):\n");
+    EMIT("\nProfiles (--profile <name>):\n");
     for (p = 0; p < profileCount(); ++p) {
-        OUT("  %s\n", profileName(p));
+        EMIT("  %s\n", profileName(p));
     }
 #undef OUT
 }

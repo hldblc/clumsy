@@ -57,30 +57,30 @@ int remoteBuildRules(char *buf, size_t size) {
     size_t used = 0;
     int i, j, k;
     char esc[FILTER_BUFSIZE + 16];
-#define OUT(...) do { int w = snprintf(buf + used, size - used, __VA_ARGS__); if (w < 0 || (size_t)w >= size - used) return -1; used += (size_t)w; } while (0)
-    OUT("[");
+#define EMIT(...) do { int w = snprintf(buf + used, size - used, __VA_ARGS__); if (w < 0 || (size_t)w >= size - used) return -1; used += (size_t)w; } while (0)
+    EMIT("[");
     for (i = 0; i < ruleSet.count; ++i) {
         Rule *r = ruleSet.rules[i];
-        OUT("%s{\"index\":%d,\"name\":\"", i ? "," : "", r->index);
-        jsonEscape(esc, sizeof(esc), r->name); OUT("%s", esc);
-        OUT("\",\"filter\":\""); jsonEscape(esc, sizeof(esc), r->filter); OUT("%s", esc);
-        OUT("\",\"process\":\""); jsonEscape(esc, sizeof(esc), r->process); OUT("%s", esc);
-        OUT("\",\"enabled\":%s,\"modules\":[", r->enabled ? "true" : "false");
+        EMIT("%s{\"index\":%d,\"name\":\"", i ? "," : "", r->index);
+        jsonEscape(esc, sizeof(esc), r->name); EMIT("%s", esc);
+        EMIT("\",\"filter\":\""); jsonEscape(esc, sizeof(esc), r->filter); EMIT("%s", esc);
+        EMIT("\",\"process\":\""); jsonEscape(esc, sizeof(esc), r->process); EMIT("%s", esc);
+        EMIT("\",\"enabled\":%s,\"modules\":[", r->enabled ? "true" : "false");
         for (j = 0; j < r->moduleCount; ++j) {
             ModuleInst *m = r->modules[j];
-            OUT("%s{\"name\":\"%s\",\"enabled\":%s,\"params\":{", j ? "," : "",
+            EMIT("%s{\"name\":\"%s\",\"enabled\":%s,\"params\":{", j ? "," : "",
                 m->desc->shortName, m->enabled ? "true" : "false");
             for (k = 0; k < m->desc->paramCount; ++k) {
                 char val[48];
                 if (m->desc->params[k].flags & PF_HIDDEN) continue;
                 moduleGetParamText(m, m->desc->params[k].name, val, sizeof(val));
-                OUT("%s\"%s\":\"%s\"", k ? "," : "", m->desc->params[k].name, val);
+                EMIT("%s\"%s\":\"%s\"", k ? "," : "", m->desc->params[k].name, val);
             }
-            OUT("}}");
+            EMIT("}}");
         }
-        OUT("]}");
+        EMIT("]}");
     }
-    OUT("]");
+    EMIT("]");
 #undef OUT
     return (int)used;
 }

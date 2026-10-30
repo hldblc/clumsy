@@ -5,18 +5,18 @@ Status: [ ] planned, [~] in progress, [x] done.
 
 ## Foundation (engine refactors that later items depend on)
 
-- [ ] 25a. Build: auto-detect Windows SDK, unit-test target, CI, CMake for MSVC, newer WinDivert
-- [ ] 24. Memory pool for packets, lock-free capture-to-processor hand-off, max kernel queue
-- [ ] 2. High-resolution scheduler: waitable timer armed for the earliest pending release
-- [ ] 12. Per-flow state: flow hash on every packet, "apply to N% of flows" scope on every module
-- [ ] 16. Multiple rule sets: several filters, each with its own module chain, first match wins
+- [x] 25a. Build: Windows SDK auto-detect, `zig build test` unit tests (534 checks), source list dedup
+- [x] 24. Memory pool for packets, lock-free capture-to-processor hand-off, max kernel queue
+- [x] 2. High-resolution scheduler: waitable timer armed for the earliest pending release
+- [x] 12. Per-flow state: flow hash on every packet, "apply to N% of flows" scope on every module
+- [x] 16. Multiple rule sets: several filters, each with its own module chain, first match wins
 
 ## Impairment engine
 
-- [ ] 1. Lag jitter and latency distributions (uniform, normal, heavy-tailed) with keep-order option
-- [ ] 3. Burst loss with a two-state Gilbert-Elliott model
-- [ ] 4. Real bandwidth shaping: token bucket + queue, tail/head/random-early drop, bufferbloat
-- [ ] 5. Asymmetric per-direction values on every module
+- [x] 1. Lag jitter and latency distributions (uniform, normal, heavy-tailed) with keep-order option
+- [x] 3. Burst loss with a two-state Gilbert-Elliott model
+- [x] 4. Real bandwidth shaping: token bucket + queue, tail/head/random-early drop, bufferbloat
+- [x] 5. Asymmetric per-direction values on every module
 - [x] 8. Richer corruption modes: xor, bit flips, zero-fill, truncate; payload/all region; redo/leave/corrupt checksum
 - [x] 10. TCP-aware impairments: SYN drop, pure-ACK drop, retransmit delay, window clamp, SYN option strip
 - [x] 11. Outages and link flapping (periodic or random, silent drop while down)
@@ -39,4 +39,4 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [x] 21. Live statistics window: engine + per-module counters, rolling throughput graph, CSV export
 - [x] 22. Packet log and pcapng export (per-packet action comments, opens in Wireshark)
 - [x] 23. Safety: panic restore, stall watchdog that reopens the link, driver diagnose/remove-service
-- [ ] 25b. CI, CMake, release packaging
+- [x] 25b. CI (GitHub Actions, all 6 variants), CMake/MSVC build, build-all packaging script, docs/BUILD.md (WinDivert 2.2.0 is current; ARM64 not attempted)
