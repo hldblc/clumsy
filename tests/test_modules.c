@@ -12,6 +12,7 @@
 #include "scenario.h"
 #include "pcap.h"
 #include "remote.h"
+#include "targets.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -1112,6 +1113,44 @@ static void testRemote(void) {
     ruleSetClear();
 }
 
+// ---- targets: hostname / IP / CIDR -> filter clause ----
+static void testTargets(void) {
+    char out[512];
+    uint32_t lo, hi;
+    char err[128];
+
+    CHECK(targetParseCidr("10.0.0.0/24", &lo, &hi));
+    CHECK_EQ(lo, 0x0A000000u);
+    CHECK_EQ(hi, 0x0A0000FFu);
+    CHECK(targetParseCidr("192.168.1.128/25", &lo, &hi));
+    CHECK_EQ(lo, 0xC0A80180u);
+    CHECK_EQ(hi, 0xC0A801FFu);
+    CHECK(targetParseCidr("1.2.3.4/32", &lo, &hi));
+    CHECK_EQ(lo, hi);
+    CHECK(!targetParseCidr("1.2.3.4", &lo, &hi));       // no slash
+    CHECK(!targetParseCidr("1.2.3.4/33", &lo, &hi));    // bad width
+
+    CHECK(targetBuildClause("10.0.0.5", out, sizeof(out)));
+    CHECK(strcmp(out, "(ip.DstAddr == 10.0.0.5 or ip.SrcAddr == 10.0.0.5)") == 0);
+
+    CHECK(targetBuildClause("10.0.0.0/24", out, sizeof(out)));
+    CHECK(strstr(out, "ip.DstAddr >= 10.0.0.0") != NULL);
+    CHECK(strstr(out, "ip.DstAddr <= 10.0.0.255") != NULL);
+
+    // the produced clauses must compile as real WinDivert filters
+    CHECK(filterCheck(out, err, sizeof(err)));
+    targetBuildClause("10.0.0.5", out, sizeof(out));
+    CHECK(filterCheck(out, err, sizeof(err)));
+
+    // localhost resolves offline to 127.0.0.1
+    if (targetBuildClause("localhost", out, sizeof(out))) {
+        CHECK(strstr(out, "127.0.0.1") != NULL);
+        CHECK(filterCheck(out, err, sizeof(err)));
+    }
+    CHECK(!targetBuildClause("", out, sizeof(out)));
+    CHECK(!targetBuildClause("1.2.3.4/99", out, sizeof(out)));
+}
+
 void testModules(void) {
     rngSeed(777);
     testLagFixed();
@@ -1132,4 +1171,5 @@ void testModules(void) {
     testScenario();
     testPcap();
     testRemote();
+    testTargets();
 }

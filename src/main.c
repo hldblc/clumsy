@@ -17,6 +17,7 @@
 #include "winui.h"
 #include "safety.h"
 #include "remote.h"
+#include "targets.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -156,7 +157,7 @@ static int uiFilterTextCb(Ihandle *ih) {
 static int uiBuildFilterCb(Ihandle *ih) {
     Rule *r = (Rule *)IupGetAttribute(ih, "_CLUMSY_RULE");
     int proto = 0, dir = 0, port = 0;
-    char ip[64] = "";
+    char ip[256] = "";
     char filter[FILTER_BUFSIZE] = "";
     const char *protoName[] = { NULL, "tcp", "udp", "icmp" };
     size_t used = 0;
@@ -165,7 +166,7 @@ static int uiBuildFilterCb(Ihandle *ih) {
     if (!IupGetParam("Filter builder", NULL, NULL,
             "Protocol: %l|any|tcp|udp|icmp|\n"
             "Direction: %l|any|outbound|inbound|\n"
-            "Remote IP (optional): %s\n"
+            "Host/IP/CIDR (optional): %s\n"
             "Port (0 = any): %i\n",
             &proto, &dir, ip, &port, NULL)) {
         return IUP_DEFAULT;
@@ -178,9 +179,12 @@ static int uiBuildFilterCb(Ihandle *ih) {
     if (dir == 1) ADD("outbound");
     else if (dir == 2) ADD("inbound");
     if (ip[0]) {
-        char clause[160];
-        snprintf(clause, sizeof(clause), "(ip.DstAddr == %s or ip.SrcAddr == %s)", ip, ip);
-        ADD(clause);
+        char clause[512];
+        if (targetBuildClause(ip, clause, sizeof(clause))) {
+            ADD(clause);
+        } else {
+            showStatus(clause);   // clause holds the error message
+        }
     }
     if (port > 0 && port <= 65535) {
         char clause[160];
