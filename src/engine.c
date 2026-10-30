@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "engine.h"
+#include "procflow.h"
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
@@ -262,6 +263,15 @@ static void drain(void) {
         Rule *r = ruleSetMatch(n->packet, n->packetLen, &n->addr);
         atomicAdd64(&engineStats.captured, 1);
         atomicAdd64(&engineStats.bytesCaptured, n->packetLen);
+        if (r != NULL && r->process[0]) {
+            // scope the rule to one process via the flow-layer pid map
+            char exe[64];
+            uint32_t pid = procflowLookup(n->packet, n->packetLen);
+            n->processId = pid;
+            if (pid == 0 || !procflowName(pid, exe, sizeof(exe)) || !processNameMatch(r->process, exe)) {
+                r = NULL;
+            }
+        }
         if (r != NULL) {
             n->ruleIndex = (uint16_t)r->index;
             listPushBack(&r->list, n);
@@ -460,6 +470,17 @@ int engineStart(char *err, size_t errSize) {
     }
     LOG("opened WinDivert with filter: %s", filterInUse);
 
+    if (ruleSetAnyProcess()) {
+        char pferr[MSG_BUFSIZE];
+        if (!procflowStart(pferr, sizeof(pferr))) {
+            snprintf(err, errSize, "%s", pferr);
+            WinDivertClose(divertHandle);
+            divertHandle = INVALID_HANDLE_VALUE;
+            return 0;
+        }
+        LOG("per-process flow tracking started");
+    }
+
     // keep as much as the kernel allows so slow processing never drops packets silently
     WinDivertSetParam(divertHandle, WINDIVERT_PARAM_QUEUE_LENGTH, WINDIVERT_PARAM_QUEUE_LENGTH_MAX);
     WinDivertSetParam(divertHandle, WINDIVERT_PARAM_QUEUE_TIME, 8000);
@@ -519,6 +540,9 @@ void engineStop(void) {
         return;
     }
     engineState = 2;
+    if (procflowRunning()) {
+        procflowStop();
+    }
     // stop receiving; the kernel queue drains into the capture thread, which then exits
     if (divertHandle != INVALID_HANDLE_VALUE) {
         WinDivertShutdown(divertHandle, WINDIVERT_SHUTDOWN_RECV);

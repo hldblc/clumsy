@@ -25,8 +25,8 @@ Status: [ ] planned, [~] in progress, [x] done.
 ## Targeting and automation
 
 - [ ] 14. Live filter validation and a visual filter builder
-- [ ] 15. Hostname and CIDR targets with periodic re-resolution
-- [ ] 13. Per-process filtering via the WinDivert flow layer
+- [~] 15. Hostname/CIDR targets (CIDR can be written directly in filters; hostname resolution pending)
+- [x] 13. Per-process filtering via the WinDivert flow layer (Process field per rule)
 - [ ] 17. Real command line: help, validation, profiles, scenarios, seed, headless
 - [ ] 6. Link profiles (3G, LTE, satellite, lossy Wi-Fi, DSL, intercontinental)
 - [ ] 19. Saved sessions and shareable JSON configs

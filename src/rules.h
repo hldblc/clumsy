@@ -8,10 +8,13 @@
 #define RULE_NAME_MAX 32
 #define FILTER_OBJ_SIZE 8192
 
+#define RULE_PROC_MAX 64
+
 struct Rule {
     char name[RULE_NAME_MAX];
     char filter[FILTER_BUFSIZE];     // filter text as typed
     char object[FILTER_OBJ_SIZE];    // compiled filter object for WinDivertHelperEvalFilter
+    char process[RULE_PROC_MAX];     // optional: only packets owned by this exe
     volatile short enabled;
     int index;
     PacketList list;                 // working list, processor thread only
@@ -19,7 +22,7 @@ struct Rule {
     int moduleCount;
     volatile LONG64 matched, bytesMatched;
     // UI handles owned by main.c
-    Ihandle *tab, *filterText, *enabledToggle;
+    Ihandle *tab, *filterText, *enabledToggle, *processText;
 };
 
 typedef struct {
@@ -38,4 +41,5 @@ int  ruleSetEnabledCount(void);
 int  ruleCompile(Rule *r, char *err, size_t errSize);
 int  ruleSetBuildUnionFilter(char *buf, size_t size);   // number of enabled rules
 Rule *ruleSetMatch(const void *packet, UINT len, const WINDIVERT_ADDRESS *addr);
+int  ruleSetAnyProcess(void);                           // any enabled rule scoped to a process?
 ModuleInst *ruleFindModule(Rule *r, const char *shortName);

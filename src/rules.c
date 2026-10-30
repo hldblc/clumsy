@@ -86,6 +86,14 @@ int ruleSetEnabledCount(void) {
     return n;
 }
 
+int ruleSetAnyProcess(void) {
+    int i;
+    for (i = 0; i < ruleSet.count; ++i) {
+        if (ruleSet.rules[i]->enabled && ruleSet.rules[i]->process[0]) return 1;
+    }
+    return 0;
+}
+
 int ruleCompile(Rule *r, char *err, size_t errSize) {
     const char *errStr = NULL;
     UINT errPos = 0;

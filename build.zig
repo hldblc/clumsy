@@ -25,6 +25,7 @@ const app_sources = [_][]const u8{
     "src/outage.c",
     "src/packet.c",
     "src/params.c",
+    "src/procflow.c",
     "src/reset.c",
     "src/rng.c",
     "src/rules.c",
@@ -51,6 +52,7 @@ const test_sources = [_][]const u8{
     "src/outage.c",
     "src/packet.c",
     "src/params.c",
+    "src/procflow.c",
     "src/reset.c",
     "src/rng.c",
     "src/rules.c",
@@ -231,6 +233,9 @@ pub fn build(b: *Builder) void {
     exe.linkSystemLibrary("comdlg32");
     exe.linkSystemLibrary("uuid");
     exe.linkSystemLibrary("ole32");
+    exe.linkSystemLibrary("psapi");
+    exe.linkSystemLibrary("advapi32");
+    exe.linkSystemLibrary("shell32");
 
     const exe_install_step = b.addInstallArtifact(exe);
     if (conf == .Ship) {
@@ -256,6 +261,8 @@ pub fn build(b: *Builder) void {
     test_exe.addLibPath(b.fmt("external/{s}/{s}", .{ windivert_dir, arch_tag }));
     test_exe.linkSystemLibrary("WinDivert");
     test_exe.linkSystemLibrary("Winmm");
+    test_exe.linkSystemLibrary("psapi");
+    test_exe.linkSystemLibrary("advapi32");
     test_exe.linkLibC();
     const run_tests = test_exe.run();
     run_tests.addPathDir(b.pathFromRoot(b.fmt("external/{s}/{s}", .{ windivert_dir, arch_tag })));

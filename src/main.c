@@ -118,7 +118,8 @@ static int uiRuleEnabledCb(Ihandle *ih, int state) {
 }
 
 static void uiAddRuleTab(Rule *r) {
-    Ihandle *filterText, *enabledToggle, *filterRow, *modulesVbox, *functionsFrame, *tab, *label;
+    Ihandle *filterText, *enabledToggle, *filterRow, *procRow, *procText, *procLabel;
+    Ihandle *modulesVbox, *functionsFrame, *tab, *label, *tabBox;
     int i;
 
     label = IupLabel("Filter:");
@@ -134,6 +135,15 @@ static void uiAddRuleTab(Rule *r) {
     IupSetAttribute(filterRow, "ALIGNMENT", "ACENTER");
     IupSetAttribute(filterRow, "GAP", "4");
 
+    procLabel = IupLabel("Process (optional, e.g. game.exe):");
+    procText = IupText(NULL);
+    IupSetAttribute(procText, "VISIBLECOLUMNS", "24");
+    IupStoreAttribute(procText, "VALUE", r->process);
+    procRow = IupHbox(procLabel, procText, IupFill(), NULL);
+    IupSetAttribute(procRow, "ALIGNMENT", "ACENTER");
+    IupSetAttribute(procRow, "GAP", "4");
+    r->processText = procText;
+
     modulesVbox = IupVbox(NULL);
     IupSetAttribute(modulesVbox, "NCMARGIN", "4x4");
     IupSetAttribute(modulesVbox, "NCGAP", "4x2");
@@ -144,7 +154,8 @@ static void uiAddRuleTab(Rule *r) {
     IupSetAttribute(functionsFrame, "TITLE", "Functions");
     IupSetAttribute(functionsFrame, "EXPAND", "HORIZONTAL");
 
-    tab = IupVbox(filterRow, functionsFrame, NULL);
+    tabBox = IupVbox(filterRow, procRow, functionsFrame, NULL);
+    tab = tabBox;
     IupSetAttribute(tab, "NCMARGIN", "4x4");
     IupSetAttribute(tab, "NCGAP", "4x4");
     IupSetStrAttribute(tab, "TABTITLE", r->name);
@@ -238,7 +249,9 @@ static int uiStartCb(Ihandle *ih) {
     for (i = 0; i < ruleSet.count; ++i) {
         Rule *r = ruleSet.rules[i];
         const char *txt = IupGetAttribute(r->filterText, "VALUE");
+        const char *proc = r->processText ? IupGetAttribute(r->processText, "VALUE") : NULL;
         snprintf(r->filter, sizeof(r->filter), "%s", txt ? txt : "");
+        snprintf(r->process, sizeof(r->process), "%s", proc ? proc : "");
     }
     if (!engineStart(err, sizeof(err))) {
         showStatus(err);

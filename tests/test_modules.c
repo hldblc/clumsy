@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include "common.h"
 #include "rules.h"
+#include "procflow.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -757,6 +758,57 @@ static void testOutage(void) {
     ruleDestroy(r);
 }
 
+// ---- per-process flow table (pure parts) ----
+static void testProcflow(void) {
+    FlowTable t;
+    FlowKey ka, kb, kc;
+    uint32_t la[4] = { 0x0A000001, 0, 0, 0 }, ra[4] = { 0x08080808, 0, 0, 0 };
+    PacketNode *out, *in;
+    flowTableInit(&t, 64);
+
+    // the two directions of one connection map to the same key
+    flowKeyFromEndpoints(&ka, 17, la, 5000, ra, 53);
+    flowKeyFromEndpoints(&kb, 17, ra, 53, la, 5000);
+    CHECK(flowKeyEqual(&ka, &kb));
+    // a different port is a different key
+    flowKeyFromEndpoints(&kc, 17, la, 5001, ra, 53);
+    CHECK(!flowKeyEqual(&ka, &kc));
+
+    flowTableSet(&t, &ka, 4321, T0);
+    CHECK_EQ(flowTableGet(&t, &kb), 4321);     // looked up from the other direction
+    CHECK_EQ(flowTableGet(&t, &kc), 0);
+    CHECK_EQ(flowTableCount(&t), 1);
+    flowTableDel(&t, &kb);
+    CHECK_EQ(flowTableGet(&t, &ka), 0);
+    CHECK_EQ(flowTableCount(&t), 0);
+
+    // a packet's key matches the key built from its own endpoints, and a flow
+    // learned from a FLOW event (local=src, remote=dst) is found from the packet
+    out = mkUdp(5000, 53, 20, 1);
+    {
+        PWINDIVERT_IPHDR ip = (PWINDIVERT_IPHDR)out->packet;
+        uint32_t src[4] = { 0, 0, 0, 0 }, dst[4] = { 0, 0, 0, 0 };
+        FlowKey kp, ke;
+        src[0] = ip->SrcAddr; dst[0] = ip->DstAddr;
+        CHECK(flowKeyFromPacket(&kp, out->packet, out->packetLen));
+        flowKeyFromEndpoints(&ke, 17, src, WinDivertHelperHtons(5000), dst, WinDivertHelperHtons(53));
+        CHECK(flowKeyEqual(&kp, &ke));
+        flowTableSet(&t, &ke, 999, T0);
+        CHECK_EQ(flowTableGet(&t, &kp), 999);        // packet finds the learned flow
+        CHECK_EQ(procflowLookup(out->packet, out->packetLen), 0);  // subsystem not running -> 0
+    }
+    packetFree(out);
+    flowTableFree(&t);
+
+    // name matching: base name, case-insensitive, optional .exe
+    CHECK(processNameMatch("game.exe", "C:\\Games\\Dune\\game.exe"));
+    CHECK(processNameMatch("game", "C:\\Games\\Dune\\game.exe"));
+    CHECK(processNameMatch("GAME.EXE", "d:/x/game.exe"));
+    CHECK(!processNameMatch("game", "C:\\game2.exe"));
+    CHECK(!processNameMatch("", "C:\\game.exe"));
+    CHECK(!processNameMatch("game.exe", NULL));
+}
+
 // ---- rules ----
 static void testRules(void) {
     char err[256], uni[4096];
@@ -803,5 +855,6 @@ void testModules(void) {
     testOutage();
     testFragment();
     testFlowScope();
+    testProcflow();
     testRules();
 }
