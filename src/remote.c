@@ -239,6 +239,23 @@ static void handleConn(SOCKET c) {
             enqueueCmd(cmd);
         }
         sendResponse(c, "202 Accepted", "application/json", "{\"ok\":true}");
+    } else if (strcmp(path, "/filter") == 0) {
+        char r[8] = "0", v[FILTER_BUFSIZE], cmd[FILTER_BUFSIZE + 32];
+        getQueryParam(query, "rule", r, sizeof(r));
+        if (getQueryParam(query, "value", v, sizeof(v)) && enqueueCmd) {
+            snprintf(cmd, sizeof(cmd), "filter %s %s", r, v);
+            enqueueCmd(cmd);
+        }
+        sendResponse(c, "202 Accepted", "application/json", "{\"ok\":true}");
+    } else if (strcmp(path, "/process") == 0) {
+        char r[8] = "0", v[128], cmd[160];
+        getQueryParam(query, "rule", r, sizeof(r));
+        getQueryParam(query, "value", v, sizeof(v));   // empty clears the scope
+        if (enqueueCmd) {
+            snprintf(cmd, sizeof(cmd), "process %s %s", r, v);
+            enqueueCmd(cmd);
+        }
+        sendResponse(c, "202 Accepted", "application/json", "{\"ok\":true}");
     } else if (strcmp(path, "/enable") == 0) {
         char r[8], m[32], on[8], cmd[96];
         if (getQueryParam(query, "rule", r, sizeof(r)) && getQueryParam(query, "module", m, sizeof(m))

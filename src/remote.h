@@ -13,6 +13,8 @@
 //   POST /profile?name=<profile>              apply a profile to the first rule
 //   POST /set?rule=0&module=lag&param=time&value=100
 //   POST /enable?rule=0&module=lag&on=1
+//   POST /filter?rule=0&value=udp%20and%20ip      set a rule's capture filter
+//   POST /process?rule=0&value=game.exe           scope a rule to a process (empty clears)
 //
 // Auth: ?token=<t>, or "Authorization: Bearer <t>", or "X-Clumsy-Token: <t>".
 #pragma once

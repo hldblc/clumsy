@@ -899,9 +899,35 @@ static int remotePostCb(Ihandle *ih, char *s, int i, double d, void *p) {
     UNREFERENCED_PARAMETER(d);
     UNREFERENCED_PARAMETER(p);
     if (s == NULL) return IUP_DEFAULT;
-    if (strieq(s, "start")) cbStart();
-    else if (strieq(s, "stop")) cbStop();
-    else remoteApplyCommand(s);
+    if (strieq(s, "start")) {
+        cbStart();
+    } else if (strieq(s, "stop")) {
+        cbStop();
+    } else if (strncmp(s, "filter ", 7) == 0 || strncmp(s, "process ", 8) == 0) {
+        // these touch the rule's widgets, so they are handled here on the UI thread
+        char buf[FILTER_BUFSIZE + 32];
+        char *save = NULL, *verb, *sr, *rest;
+        int ri;
+        snprintf(buf, sizeof(buf), "%s", s);
+        verb = strtok_s(buf, " ", &save);
+        sr = strtok_s(NULL, " ", &save);
+        rest = strtok_s(NULL, "", &save);   // remainder, may be NULL (clear)
+        ri = sr ? atoi(sr) : -1;
+        if (ri >= 0 && ri < ruleSet.count) {
+            Rule *r = ruleSet.rules[ri];
+            if (strieq(verb, "filter")) {
+                snprintf(r->filter, sizeof(r->filter), "%s", rest ? rest : "");
+                if (r->filterText) IupStoreAttribute(r->filterText, "VALUE", r->filter);
+                updateFilterStatus(r);
+            } else {
+                snprintf(r->process, sizeof(r->process), "%s", rest ? rest : "");
+                if (r->processText) IupStoreAttribute(r->processText, "VALUE", r->process);
+            }
+            engineWake();
+        }
+    } else {
+        remoteApplyCommand(s);
+    }
     return IUP_DEFAULT;
 }
 
