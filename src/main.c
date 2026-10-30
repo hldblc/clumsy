@@ -12,6 +12,7 @@
 #include "config.h"
 #include "profiles.h"
 #include "cli.h"
+#include "scenario.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -31,6 +32,9 @@ BOOL parameterized = 0;
 static Ihandle *dialog, *startButton, *stateIcon, *statusLabel, *tabs, *presetList;
 static Ihandle *addRuleButton, *removeRuleButton, *advancedToggle, *timer, *timeoutTimer;
 static Ihandle *profileList, *saveButton, *loadButton;
+static Ihandle *scenarioButton, *scenarioLoadButton, *scenarioLabel, *scenarioTimer;
+static Scenario scenario;
+static int scenarioLoaded = 0, scenarioPlaying = 0;
 static void uiAddRuleTab(Rule *r);
 static int dialogMapped = 0;
 static int ruleSerial = 1;
@@ -377,6 +381,88 @@ static int uiLoadCb(Ihandle *ih) {
     return IUP_DEFAULT;
 }
 
+// ---- scenario playback ----
+static void scenarioApply(const char *frag, void *user) {
+    int i;
+    UNREFERENCED_PARAMETER(user);
+    for (i = 0; i < ruleSet.count; ++i) {
+        configApplyFragment(ruleSet.rules[i], frag);
+    }
+    engineWake();
+}
+
+static void scenarioSetPlaying(int playing) {
+    scenarioPlaying = playing;
+    IupSetAttribute(scenarioTimer, "RUN", playing ? "YES" : "NO");
+    IupSetStrAttribute(scenarioButton, "TITLE", playing ? "Stop scenario" : "Play scenario");
+}
+
+static int uiScenarioTickCb(Ihandle *ih) {
+    char buf[64];
+    int64_t now = clockNowUs();
+    UNREFERENCED_PARAMETER(ih);
+    if (!scenarioPlaying) return IUP_DEFAULT;
+    if (!scenarioTick(&scenario, now, scenarioApply, NULL)) {
+        scenarioSetPlaying(0);
+        IupSetStrAttribute(scenarioLabel, "TITLE", "scenario: done");
+        return IUP_DEFAULT;
+    }
+    snprintf(buf, sizeof(buf), "scenario: %d.%01ds / %d.%01ds",
+             scenarioElapsedMs(&scenario, now) / 1000, (scenarioElapsedMs(&scenario, now) / 100) % 10,
+             scenarioSpanMs(&scenario) / 1000, (scenarioSpanMs(&scenario) / 100) % 10);
+    IupSetStrAttribute(scenarioLabel, "TITLE", buf);
+    return IUP_DEFAULT;
+}
+
+static int uiScenarioLoadCb(Ihandle *ih) {
+    Ihandle *dlg = IupFileDlg();
+    UNREFERENCED_PARAMETER(ih);
+    IupSetAttribute(dlg, "DIALOGTYPE", "OPEN");
+    IupSetAttribute(dlg, "TITLE", "Load scenario");
+    IupSetAttribute(dlg, "EXTFILTER", "scenario (*.txt;*.scenario)|*.txt;*.scenario|All files|*.*|");
+    IupPopup(dlg, IUP_CURRENT, IUP_CURRENT);
+    if (IupGetInt(dlg, "STATUS") == 0) {
+        const char *path = IupGetAttribute(dlg, "VALUE");
+        static char buf[CONFIG_TEXT_MAX];
+        char err[MSG_BUFSIZE];
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            buf[n] = 0;
+            if (scenarioParse(&scenario, buf, err, sizeof(err))) {
+                char msg[96];
+                scenarioLoaded = 1;
+                snprintf(msg, sizeof(msg), "scenario: %d steps loaded", scenario.count);
+                IupSetStrAttribute(scenarioLabel, "TITLE", msg);
+            } else {
+                scenarioLoaded = 0;
+                IupSetStrAttribute(scenarioLabel, "TITLE", err);
+            }
+        } else {
+            IupSetStrAttribute(scenarioLabel, "TITLE", "scenario: cannot open file");
+        }
+    }
+    IupDestroy(dlg);
+    return IUP_DEFAULT;
+}
+
+static int uiScenarioPlayCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    if (scenarioPlaying) {
+        scenarioSetPlaying(0);
+        IupSetStrAttribute(scenarioLabel, "TITLE", "scenario: stopped");
+        return IUP_DEFAULT;
+    }
+    if (!scenarioLoaded) {
+        IupSetStrAttribute(scenarioLabel, "TITLE", "scenario: load a file first");
+        return IUP_DEFAULT;
+    }
+    scenarioStart(&scenario, clockNowUs());
+    scenarioSetPlaying(1);
+    return IUP_DEFAULT;
+}
+
 // rebuild every rule tab from the current rule set (after a config load)
 static void rebuildTabs(void) {
     Ihandle *child;
@@ -716,10 +802,20 @@ static void init(int argc, char *argv[]) {
         uiAddRuleTab(ruleSet.rules[ix]);
     }
 
+    scenarioLoadButton = IupButton("Load scenario", NULL);
+    IupSetAttribute(scenarioLoadButton, "PADDING", "4x");
+    IupSetCallback(scenarioLoadButton, "ACTION", uiScenarioLoadCb);
+    scenarioButton = IupButton("Play scenario", NULL);
+    IupSetAttribute(scenarioButton, "PADDING", "4x");
+    IupSetCallback(scenarioButton, "ACTION", uiScenarioPlayCb);
+    scenarioLabel = IupLabel("scenario: none");
+    IupSetAttribute(scenarioLabel, "EXPAND", "HORIZONTAL");
+
     dialog = IupDialog(
         dialogVBox = IupVbox(
             topFrame,
             tabs,
+            IupHbox(scenarioLoadButton, scenarioButton, scenarioLabel, NULL),
             statusLabel,
             NULL
         )
@@ -735,6 +831,10 @@ static void init(int argc, char *argv[]) {
     timer = IupTimer();
     IupSetAttribute(timer, "TIME", STR(ICON_UPDATE_MS));
     IupSetCallback(timer, "ACTION_CB", uiTimerCb);
+
+    scenarioTimer = IupTimer();
+    IupSetAttribute(scenarioTimer, "TIME", "100");
+    IupSetCallback(scenarioTimer, "ACTION_CB", uiScenarioTickCb);
 
     argValue = IupGetGlobal("timeout");
     if (argValue != NULL) {
@@ -807,6 +907,7 @@ int main(int argc, char *argv[]) {
         engineStop();
     }
     IupDestroy(timer);
+    if (scenarioTimer) IupDestroy(scenarioTimer);
     if (timeoutTimer) IupDestroy(timeoutTimer);
     IupClose();
     endTimePeriod();

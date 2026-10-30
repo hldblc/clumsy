@@ -9,6 +9,7 @@
 #include "procflow.h"
 #include "config.h"
 #include "profiles.h"
+#include "scenario.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -965,6 +966,60 @@ static void testConfig(void) {
     ruleSetClear();
 }
 
+// ---- scenario ----
+static int scenApplyCount;
+static char scenLast[256];
+static void scenMockApply(const char *frag, void *user) {
+    UNREFERENCED_PARAMETER(user);
+    ++scenApplyCount;
+    snprintf(scenLast, sizeof(scenLast), "%s", frag);
+}
+
+static void testScenario(void) {
+    Scenario s;
+    char err[256];
+    const char *text =
+        "# a short scenario\n"
+        "0     lag=on lag.time=50\n"
+        "5000  lag.time=300 drop=on drop.chance=5\n"
+        "15000 outage=on\n";
+    CHECK(scenarioParse(&s, text, err, sizeof(err)));
+    CHECK_EQ(s.count, 3);
+    CHECK_EQ(s.loop, 0);
+    CHECK_EQ(scenarioSpanMs(&s), 15000);
+
+    scenApplyCount = 0;
+    scenarioStart(&s, T0);
+    // at t=0 the first step fires
+    CHECK(scenarioTick(&s, T0, scenMockApply, NULL));
+    CHECK_EQ(scenApplyCount, 1);
+    CHECK(strstr(scenLast, "lag.time=50") != NULL);
+    // nothing new until 5s
+    CHECK(scenarioTick(&s, T0 + 4999000, scenMockApply, NULL));
+    CHECK_EQ(scenApplyCount, 1);
+    CHECK(scenarioTick(&s, T0 + 5000000, scenMockApply, NULL));
+    CHECK_EQ(scenApplyCount, 2);
+    // jumping past the end fires the remaining step and finishes
+    CHECK(!scenarioTick(&s, T0 + 20000000, scenMockApply, NULL));
+    CHECK_EQ(scenApplyCount, 3);
+    CHECK(strstr(scenLast, "outage=on") != NULL);
+
+    // loop keeps running and restarts
+    {
+        Scenario l;
+        const char *lt = "0 drop=on\n1000 drop=off\nloop\n";
+        CHECK(scenarioParse(&l, lt, err, sizeof(err)));
+        CHECK_EQ(l.loop, 1);
+        scenApplyCount = 0;
+        scenarioStart(&l, T0);
+        CHECK(scenarioTick(&l, T0 + 2000000, scenMockApply, NULL));   // fires both, then restarts
+        CHECK(scenApplyCount >= 2);
+    }
+
+    CHECK(!scenarioParse(&s, "# only comments\n", err, sizeof(err)));
+    CHECK(!scenarioParse(&s, "notanumber lag=on\n", err, sizeof(err)));
+}
+
 void testModules(void) {
     rngSeed(777);
     testLagFixed();
@@ -982,4 +1037,5 @@ void testModules(void) {
     testProcflow();
     testRules();
     testConfig();
+    testScenario();
 }
