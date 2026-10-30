@@ -2,6 +2,7 @@
 #include <string.h>
 #include "engine.h"
 #include "procflow.h"
+#include "pcap.h"
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
@@ -245,6 +246,10 @@ static void sendList(PacketList *list) {
             atomicAdd64(&engineStats.latencySamples, 1);
         } else {
             atomicAdd64(&engineStats.sendFailed, 1);
+        }
+        if (pcapIsOpen()) {
+            const char *rn = (n->ruleIndex < (uint16_t)ruleSet.count) ? ruleSet.rules[n->ruleIndex]->name : "passthrough";
+            pcapLogNode(n, rn);
         }
         packetFree(n);
     }

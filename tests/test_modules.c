@@ -10,6 +10,7 @@
 #include "config.h"
 #include "profiles.h"
 #include "scenario.h"
+#include "pcap.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -1020,6 +1021,54 @@ static void testScenario(void) {
     CHECK(!scenarioParse(&s, "notanumber lag=on\n", err, sizeof(err)));
 }
 
+// ---- pcapng writer ----
+static uint32_t rd32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void testPcap(void) {
+    unsigned char buf[2048];
+    size_t hn, pn;
+    PacketNode *n;
+    char comment[160];
+
+    hn = pcapBuildHeaders(buf, sizeof(buf));
+    CHECK(hn == 48);
+    CHECK_EQ(rd32(buf + 0), 0x0A0D0D0A);        // SHB
+    CHECK_EQ(rd32(buf + 8), 0x1A2B3C4D);        // byte-order magic
+    CHECK_EQ(rd32(buf + 4), 28);                // SHB length
+    CHECK_EQ(rd32(buf + 24), 28);               // SHB trailer
+    CHECK_EQ(rd32(buf + 28), 0x00000001);       // IDB
+    CHECK_EQ(rd32(buf + 28 + 4), 20);           // IDB length
+    CHECK_EQ(buf[28 + 8], 101);                 // LINKTYPE_RAW
+
+    n = mkUdp(1, 2, 40, 1);
+    pn = pcapBuildPacketBlock(buf, sizeof(buf), (const unsigned char *)n->packet, n->packetLen,
+                              1700000000000000LL, "out Rule 1 lagged");
+    CHECK(pn > 0);
+    CHECK_EQ(rd32(buf + 0), 0x00000006);        // EPB
+    CHECK_EQ(rd32(buf + 4), (uint32_t)pn);      // total length
+    CHECK_EQ(rd32(buf + 4), rd32(buf + pn - 4)); // leading == trailing length
+    CHECK_EQ(rd32(buf + 20), n->packetLen);     // captured length
+    CHECK_EQ(rd32(buf + 24), n->packetLen);     // original length
+    CHECK((pn % 4) == 0);
+    packetFree(n);
+
+    // comment reflects the flags and direction
+    pcapActionComment(comment, sizeof(comment), "Game", PN_FLAG_LAGGED | PN_FLAG_TAMPERED, 1);
+    CHECK(strstr(comment, "out") != NULL);
+    CHECK(strstr(comment, "Game") != NULL);
+    CHECK(strstr(comment, "lagged") != NULL);
+    CHECK(strstr(comment, "tampered") != NULL);
+    pcapActionComment(comment, sizeof(comment), "R", PN_FLAG_DUPLICATE, 0);
+    CHECK(strstr(comment, "in") != NULL);
+    CHECK(strstr(comment, "duplicate") != NULL);
+
+    // a too-small buffer is refused, not overrun
+    CHECK_EQ(pcapBuildHeaders(buf, 10), 0u);
+    CHECK_EQ(pcapBuildPacketBlock(buf, 8, buf, 40, 0, "x"), 0u);
+}
+
 void testModules(void) {
     rngSeed(777);
     testLagFixed();
@@ -1038,4 +1087,5 @@ void testModules(void) {
     testRules();
     testConfig();
     testScenario();
+    testPcap();
 }

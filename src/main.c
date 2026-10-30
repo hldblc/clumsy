@@ -13,6 +13,7 @@
 #include "profiles.h"
 #include "cli.h"
 #include "scenario.h"
+#include "pcap.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -31,7 +32,7 @@ BOOL parameterized = 0;
 
 static Ihandle *dialog, *startButton, *stateIcon, *statusLabel, *tabs, *presetList;
 static Ihandle *addRuleButton, *removeRuleButton, *advancedToggle, *timer, *timeoutTimer;
-static Ihandle *profileList, *saveButton, *loadButton, *statsButton;
+static Ihandle *profileList, *saveButton, *loadButton, *statsButton, *logButton;
 static Ihandle *scenarioButton, *scenarioLoadButton, *scenarioLabel, *scenarioTimer;
 static Scenario scenario;
 static int scenarioLoaded = 0, scenarioPlaying = 0;
@@ -617,6 +618,33 @@ static int uiStatsCsvCb(Ihandle *ih) {
     return IUP_DEFAULT;
 }
 
+static int uiLogCb(Ihandle *ih) {
+    if (pcapIsOpen()) {
+        pcapClose();
+        IupSetStrAttribute(ih, "TITLE", "Log...");
+        showStatus("Stopped pcapng logging.");
+        return IUP_DEFAULT;
+    } else {
+        Ihandle *dlg = IupFileDlg();
+        IupSetAttribute(dlg, "DIALOGTYPE", "SAVE");
+        IupSetAttribute(dlg, "TITLE", "Log packets to pcapng");
+        IupSetAttribute(dlg, "EXTFILTER", "pcapng|*.pcapng|All files|*.*|");
+        IupSetAttribute(dlg, "FILE", "clumsy.pcapng");
+        IupPopup(dlg, IUP_CURRENT, IUP_CURRENT);
+        if (IupGetInt(dlg, "STATUS") != -1) {
+            const char *path = IupGetAttribute(dlg, "VALUE");
+            if (pcapOpen(path)) {
+                IupSetStrAttribute(ih, "TITLE", "Stop log");
+                showStatus("Logging sent packets to pcapng. Open it in Wireshark; comments show the actions.");
+            } else {
+                showStatus("Could not open the pcapng file for writing.");
+            }
+        }
+        IupDestroy(dlg);
+    }
+    return IUP_DEFAULT;
+}
+
 static int uiStatsCb(Ihandle *ih) {
     UNREFERENCED_PARAMETER(ih);
     if (statsDialog == NULL) {
@@ -977,10 +1005,13 @@ static void init(int argc, char *argv[]) {
     statsButton = IupButton("Stats", NULL);
     IupSetAttribute(statsButton, "PADDING", "4x");
     IupSetCallback(statsButton, "ACTION", uiStatsCb);
+    logButton = IupButton("Log...", NULL);
+    IupSetAttribute(logButton, "PADDING", "4x");
+    IupSetCallback(logButton, "ACTION", uiLogCb);
 
     controlHbox = IupHbox(stateIcon, startButton, IupFill(),
                           IupLabel("Profile:"), profileList,
-                          saveButton, loadButton, statsButton, addRuleButton, removeRuleButton, advancedToggle, NULL);
+                          saveButton, loadButton, statsButton, logButton, addRuleButton, removeRuleButton, advancedToggle, NULL);
     IupSetAttribute(controlHbox, "ALIGNMENT", "ACENTER");
     IupSetAttribute(controlHbox, "GAP", "4");
     IupSetAttribute(controlHbox, "NCMARGIN", "4x4");
@@ -1103,6 +1134,7 @@ int main(int argc, char *argv[]) {
     if (engineIsRunning()) {
         engineStop();
     }
+    pcapClose();
     IupDestroy(timer);
     if (scenarioTimer) IupDestroy(scenarioTimer);
     if (statsTimer) IupDestroy(statsTimer);

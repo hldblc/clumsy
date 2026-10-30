@@ -37,6 +37,6 @@ Status: [ ] planned, [~] in progress, [x] done.
 ## Observability, safety and platform
 
 - [x] 21. Live statistics window: engine + per-module counters, rolling throughput graph, CSV export
-- [ ] 22. Packet log and pcapng export
+- [x] 22. Packet log and pcapng export (per-packet action comments, opens in Wireshark)
 - [ ] 23. Safety and recovery hardening: crash flush, diagnostics, driver service control
 - [ ] 25b. CI, CMake, release packaging
