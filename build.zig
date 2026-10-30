@@ -14,18 +14,31 @@ const windows_kits_base = "C:/Program Files (x86)/Windows Kits/10/bin";
 const app_sources = [_][]const u8{
     "src/bandwidth.c",
     "src/clock.c",
-    "src/divert.c",
     "src/drop.c",
     "src/duplicate.c",
     "src/elevate.c",
+    "src/engine.c",
     "src/lag.c",
     "src/main.c",
     "src/ood.c",
     "src/packet.c",
+    "src/params.c",
     "src/reset.c",
+    "src/rng.c",
+    "src/rules.c",
     "src/tamper.c",
     "src/throttle.c",
+    "src/uibind.c",
     "src/utils.c",
+};
+
+// Driver-free sources exercised by the unit tests (no IUP, no WinDivert linkage).
+const test_sources = [_][]const u8{
+    "tests/test_main.c",
+    "src/clock.c",
+    "src/packet.c",
+    "src/params.c",
+    "src/rng.c",
 };
 
 fn versionGreater(a: [4]u32, b: [4]u32) bool {
@@ -167,8 +180,12 @@ pub fn build(b: *Builder) void {
 
     exe.step.dependOn(&cmd.step);
     exe.addObjectFile(res_obj_path);
+    const cflags: []const []const u8 = switch (conf) {
+        .Debug => &[_][]const u8{ "-D_DEBUG", "-Wall", "-Wno-unused-function" },
+        else => &[_][]const u8{ "-DNDEBUG", "-Wall", "-Wno-unused-function" },
+    };
     for (app_sources) |src| {
-        exe.addCSourceFile(src, &.{""});
+        exe.addCSourceFile(src, cflags);
     }
 
     if (arch == .x86)
@@ -207,6 +224,20 @@ pub fn build(b: *Builder) void {
 
     const clean_all = b.step("clean", "purge zig-cache and zig-out");
     clean_all.dependOn(&b.addRemoveDirTree(b.install_path).step);
+
+    // Unit tests for the driver-free code: `zig build test`
+    const test_exe = b.addExecutable("clumsy_test", null);
+    test_exe.setBuildMode(.Debug);
+    test_exe.setTarget(target);
+    for (test_sources) |src| {
+        test_exe.addCSourceFile(src, &.{""});
+    }
+    test_exe.addIncludeDir("src");
+    test_exe.addIncludeDir(b.fmt("external/{s}/include", .{windivert_dir}));
+    test_exe.linkLibC();
+    const run_tests = test_exe.run();
+    const test_step = b.step("test", "build and run the unit tests");
+    test_step.dependOn(&run_tests.step);
 }
 
 pub const RemoveOutFile = struct {

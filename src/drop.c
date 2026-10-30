@@ -1,86 +1,52 @@
-// dropping packet module
-#include <stdlib.h>
-#include <Windows.h>
-#include "iup.h"
+// Drop: discard packets with a given chance.
 #include "common.h"
+
 #define NAME "drop"
 
-static Ihandle *inboundCheckbox, *outboundCheckbox, *chanceInput;
+typedef struct {
+    ScopeState scope;
+    volatile short chance;    // [0, 10000]
+} DropState;
 
-static volatile short dropEnabled = 0,
-    dropInbound = 1, dropOutbound = 1,
-    chance = 1000; // [0-10000]
+static const ParamDesc dropParams[] = {
+    SCOPE_PARAMS(DropState),
+    { "chance", "Chance(%)", PT_CHANCE, offsetof(DropState, chance), 0, 10000, 1000, NULL, 0 },
+};
 
-
-static Ihandle* dropSetupUI() {
-    Ihandle *dropControlsBox = IupHbox(
-        inboundCheckbox = IupToggle("Inbound", NULL),
-        outboundCheckbox = IupToggle("Outbound", NULL),
-        IupLabel("Chance(%):"),
-        chanceInput = IupText(NULL),
-        NULL
-    );
-
-    IupSetAttribute(chanceInput, "VISIBLECOLUMNS", "4");
-    IupSetAttribute(chanceInput, "VALUE", "10.0");
-    IupSetCallback(chanceInput, "VALUECHANGED_CB", uiSyncChance);
-    IupSetAttribute(chanceInput, SYNCED_VALUE, (char*)&chance);
-    IupSetCallback(inboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(inboundCheckbox, SYNCED_VALUE, (char*)&dropInbound);
-    IupSetCallback(outboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(outboundCheckbox, SYNCED_VALUE, (char*)&dropOutbound);
-
-    // enable by default to avoid confusing
-    IupSetAttribute(inboundCheckbox, "VALUE", "ON");
-    IupSetAttribute(outboundCheckbox, "VALUE", "ON");
-
-    if (parameterized) {
-        setFromParameter(inboundCheckbox, "VALUE", NAME"-inbound");
-        setFromParameter(outboundCheckbox, "VALUE", NAME"-outbound");
-        setFromParameter(chanceInput, "VALUE", NAME"-chance");
-    }
-
-    return dropControlsBox;
-}
-
-static void dropStartUp() {
+static void dropStartUp(ModuleInst *inst, int64_t now) {
+    UNREFERENCED_PARAMETER(inst);
+    UNREFERENCED_PARAMETER(now);
     LOG("drop enabled");
 }
 
-static void dropCloseDown(PacketNode *head, PacketNode *tail) {
-    UNREFERENCED_PARAMETER(head);
-    UNREFERENCED_PARAMETER(tail);
+static void dropCloseDown(ModuleInst *inst, PacketList *list) {
+    UNREFERENCED_PARAMETER(inst);
+    UNREFERENCED_PARAMETER(list);
     LOG("drop disabled");
 }
 
-static short dropProcess(PacketNode *head, PacketNode* tail) {
-    int dropped = 0;
-    while (head->next != tail) {
-        PacketNode *pac = head->next;
-        // chance in range of [0, 10000]
-        if (checkDirection(pac->addr.Outbound, dropInbound, dropOutbound)
-            && calcChance(chance)) {
-            LOG("dropped with chance %.1f%%, direction %s",
-                chance/100.0, pac->addr.Outbound ? "OUTBOUND" : "INBOUND");
-            freeNode(popNode(pac));
-            ++dropped;
-        } else {
-            head = head->next;
+static short dropProcess(ModuleInst *inst, PacketList *list, int64_t now) {
+    DropState *st = (DropState *)inst->state;
+    PacketNode *pac, *next;
+    short dropped = 0;
+    UNREFERENCED_PARAMETER(now);
+    for (pac = listFirst(list); pac != NULL; pac = next) {
+        next = listNext(list, pac);
+        if (scopeMatch(&st->scope, pac) && rngChance(st->chance)) {
+            LOG("dropped with chance %.1f%%, %s", st->chance / 100.0, pac->addr.Outbound ? "outbound" : "inbound");
+            atomicAdd64(&inst->stats.packets, 1);
+            atomicAdd64(&inst->stats.bytes, pac->packetLen);
+            atomicAdd64(&inst->stats.dropped, 1);
+            packetFree(listUnlink(list, pac));
+            dropped = 1;
         }
     }
-
-    return dropped > 0;
+    return dropped;
 }
 
-
-Module dropModule = {
-    "Drop",
-    NAME,
-    (short*)&dropEnabled,
-    dropSetupUI,
-    dropStartUp,
-    dropCloseDown,
-    dropProcess,
-    // runtime fields
-    0, 0, NULL
+const ModuleDesc dropModuleDesc = {
+    "Drop", NAME, sizeof(DropState),
+    dropParams, (int)(sizeof(dropParams) / sizeof(dropParams[0])),
+    NULL, NULL, NULL,
+    dropStartUp, dropCloseDown, dropProcess, NULL
 };

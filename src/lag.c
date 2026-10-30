@@ -1,135 +1,102 @@
-// lagging packets
-#include "iup.h"
+// Lag: hold packets for a delay, release them in order of their release time.
 #include "common.h"
+
 #define NAME "lag"
-#define LAG_MIN "0"
-#define LAG_MAX "15000"
-#define KEEP_AT_MOST 2000
-// send FLUSH_WHEN_FULL packets when buffer is full
-#define FLUSH_WHEN_FULL 800
-#define LAG_DEFAULT 50
+#define LAG_KEEP_AT_MOST 2000
+#define LAG_FLUSH_WHEN_FULL 800
 
-// don't need a chance
-static Ihandle *inboundCheckbox, *outboundCheckbox, *timeInput;
+typedef struct {
+    ScopeState scope;
+    volatile short time[2];   // delay in ms, per direction
+    PacketList buf;           // held packets ordered by releaseTime
+} LagState;
 
-static volatile short lagEnabled = 0,
-    lagInbound = 1,
-    lagOutbound = 1,
-    lagTime = LAG_DEFAULT; // default for 50ms
+static const ParamDesc lagParams[] = {
+    SCOPE_PARAMS(LagState),
+    { "time", "Delay(ms)", PT_INT, offsetof(LagState, time), 0, 15000, 50, NULL, PF_PERDIR },
+};
 
-static PacketNode lagHeadNode = {0}, lagTailNode = {0};
-static PacketNode *bufHead = &lagHeadNode, *bufTail = &lagTailNode;
-static int bufSize = 0;
-
-static INLINE_FUNCTION short isBufEmpty() {
-    short ret = bufHead->next == bufTail;
-    if (ret) assert(bufSize == 0);
-    return ret;
+static void lagInit(ModuleInst *inst) {
+    LagState *st = (LagState *)inst->state;
+    listInit(&st->buf);
 }
 
-static Ihandle *lagSetupUI() {
-    Ihandle *lagControlsBox = IupHbox(
-        inboundCheckbox = IupToggle("Inbound", NULL),
-        outboundCheckbox = IupToggle("Outbound", NULL),
-        IupLabel("Delay(ms):"),
-        timeInput = IupText(NULL),
-        NULL
-        );
+static void lagStartUp(ModuleInst *inst, int64_t now) {
+    LagState *st = (LagState *)inst->state;
+    UNREFERENCED_PARAMETER(now);
+    listEnsureInit(&st->buf);
+    assert(listEmpty(&st->buf));
+}
 
-    IupSetAttribute(timeInput, "VISIBLECOLUMNS", "4");
-    IupSetAttribute(timeInput, "VALUE", STR(LAG_DEFAULT));
-    IupSetCallback(timeInput, "VALUECHANGED_CB", uiSyncInteger);
-    IupSetAttribute(timeInput, SYNCED_VALUE, (char*)&lagTime);
-    IupSetAttribute(timeInput, INTEGER_MAX, LAG_MAX);
-    IupSetAttribute(timeInput, INTEGER_MIN, LAG_MIN);
-    IupSetCallback(inboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(inboundCheckbox, SYNCED_VALUE, (char*)&lagInbound);
-    IupSetCallback(outboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(outboundCheckbox, SYNCED_VALUE, (char*)&lagOutbound);
+static void lagCloseDown(ModuleInst *inst, PacketList *list) {
+    LagState *st = (LagState *)inst->state;
+    LOG("closing lag, flushing %d packets", listCount(&st->buf));
+    listAppendAll(list, &st->buf);
+    atomicExch32(&inst->stats.queued, 0);
+}
 
-    // enable by default to avoid confusing
-    IupSetAttribute(inboundCheckbox, "VALUE", "ON");
-    IupSetAttribute(outboundCheckbox, "VALUE", "ON");
-
-    if (parameterized) {
-        setFromParameter(inboundCheckbox, "VALUE", NAME"-inbound");
-        setFromParameter(outboundCheckbox, "VALUE", NAME"-outbound");
-        setFromParameter(timeInput, "VALUE", NAME"-time");
+static void lagInsertSorted(PacketList *buf, PacketNode *pac) {
+    PacketNode *q = listLast(buf);
+    while (q != NULL && q->releaseTime > pac->releaseTime) {
+        q = listPrev(buf, q);
     }
-
-    return lagControlsBox;
-}
-
-static void lagStartUp() {
-    if (bufHead->next == NULL && bufTail->next == NULL) {
-        bufHead->next = bufTail;
-        bufTail->prev = bufHead;
-        bufSize = 0;
+    if (q != NULL) {
+        listInsertAfter(buf, pac, q);
     } else {
-        assert(isBufEmpty());
+        listPushFront(buf, pac);
     }
-    startTimePeriod();
 }
 
-static void lagCloseDown(PacketNode *head, PacketNode *tail) {
-    PacketNode *oldLast = tail->prev;
-    UNREFERENCED_PARAMETER(head);
-    // flush all buffered packets
-    LOG("Closing down lag, flushing %d packets", bufSize);
-    while(!isBufEmpty()) {
-        insertAfter(popNode(bufTail->prev), oldLast);
-        --bufSize;
-    }
-    endTimePeriod();
-}
+static short lagProcess(ModuleInst *inst, PacketList *list, int64_t now) {
+    LagState *st = (LagState *)inst->state;
+    PacketNode *pac, *next;
+    short acted = 0;
 
-static short lagProcess(PacketNode *head, PacketNode *tail) {
-    DWORD currentTime = timeGetTime();
-    PacketNode *pac = tail->prev;
-    // pick up all packets and fill in the current time
-    while (bufSize < KEEP_AT_MOST && pac != head) {
-        if (checkDirection(pac->addr.Outbound, lagInbound, lagOutbound)) {
-            insertAfter(popNode(pac), bufHead)->timestamp = timeGetTime();
-            ++bufSize;
-            pac = tail->prev;
-        } else {
-            pac = pac->prev;
+    // pick up matching packets and stamp their release time
+    for (pac = listFirst(list); pac != NULL; pac = next) {
+        next = listNext(list, pac);
+        if (listCount(&st->buf) >= LAG_KEEP_AT_MOST) break;
+        if (!scopeMatch(&st->scope, pac)) continue;
+        listUnlink(list, pac);
+        pac->releaseTime = pac->captureTime + MS_TO_US(PERDIR(st->time, pac));
+        pac->flags |= PN_FLAG_LAGGED;
+        lagInsertSorted(&st->buf, pac);
+        atomicAdd64(&inst->stats.packets, 1);
+        atomicAdd64(&inst->stats.bytes, pac->packetLen);
+        acted = 1;
+    }
+
+    // release everything that is due
+    while ((pac = listFirst(&st->buf)) != NULL && pac->releaseTime <= now) {
+        listUnlink(&st->buf, pac);
+        listPushBack(list, pac);
+        acted = 1;
+    }
+
+    // buffer full: push out the oldest batch rather than grow without bound
+    if (listCount(&st->buf) >= LAG_KEEP_AT_MOST) {
+        int n = LAG_FLUSH_WHEN_FULL;
+        LOG("lag buffer full, flushing %d packets", n);
+        while (n-- > 0 && (pac = listFirst(&st->buf)) != NULL) {
+            listUnlink(&st->buf, pac);
+            listPushBack(list, pac);
         }
     }
 
-    // try sending overdue packets from buffer tail
-    while (!isBufEmpty()) {
-        pac = bufTail->prev;
-        if (currentTime > pac->timestamp + lagTime) {
-            insertAfter(popNode(bufTail->prev), head); // sending queue is already empty by now
-            --bufSize;
-            LOG("Send lagged packets.");
-        } else {
-            LOG("Sent some lagged packets, still have %d in buf", bufSize);
-            break;
-        }
-    }
-
-    // if buffer is full just flush things out
-    if (bufSize >= KEEP_AT_MOST) {
-        int flushCnt = FLUSH_WHEN_FULL;
-        while (flushCnt-- > 0) {
-            insertAfter(popNode(bufTail->prev), head);
-            --bufSize;
-        }
-    }
-
-    return bufSize > 0;
+    atomicExch32(&inst->stats.queued, listCount(&st->buf));
+    return (short)(acted || !listEmpty(&st->buf));
 }
 
-Module lagModule = {
-    "Lag",
-    NAME,
-    (short*)&lagEnabled,
-    lagSetupUI,
-    lagStartUp,
-    lagCloseDown,
-    lagProcess,
-    // runtime fields
-    0, 0, NULL
+static int64_t lagNextDeadline(ModuleInst *inst, int64_t now) {
+    LagState *st = (LagState *)inst->state;
+    PacketNode *pac = listFirst(&st->buf);
+    UNREFERENCED_PARAMETER(now);
+    return pac ? pac->releaseTime : -1;
+}
+
+const ModuleDesc lagModuleDesc = {
+    "Lag", NAME, sizeof(LagState),
+    lagParams, (int)(sizeof(lagParams) / sizeof(lagParams[0])),
+    NULL, lagInit, NULL,
+    lagStartUp, lagCloseDown, lagProcess, lagNextDeadline
 };

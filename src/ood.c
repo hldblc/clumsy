@@ -1,152 +1,115 @@
-// out of order arrange packets module
-#include "iup.h"
+// Out of order: hold a lone packet until the next one arrives, or swap
+// neighbouring packets when several are queued.
 #include "common.h"
+
 #define NAME "ood"
-// keep a picked packet at most for KEEP_TURNS_MAX steps, or if there's no following
-// one, it will just be sent
-#define KEEP_TURNS_MAX 10 
+#define OOD_HOLD_MAX_US 400000   // give up holding after this long
 
-static Ihandle *inboundCheckbox, *outboundCheckbox, *chanceInput;
+typedef struct {
+    ScopeState scope;
+    volatile short chance;    // [0, 10000]
+    PacketNode *held;
+    int64_t heldSince;
+} OodState;
 
-static volatile short oodEnabled = 0,
-    oodInbound = 1, oodOutbound = 1,
-    chance = 1000; // [0-10000]
-static PacketNode *oodPacket = NULL;
-static int giveUpCnt;
+static const ParamDesc oodParams[] = {
+    SCOPE_PARAMS(OodState),
+    { "chance", "Chance(%)", PT_CHANCE, offsetof(OodState, chance), 0, 10000, 1000, NULL, 0 },
+};
 
-static Ihandle *oodSetupUI() {
-    Ihandle *oodControlsBox = IupHbox(
-        inboundCheckbox = IupToggle("Inbound", NULL),
-        outboundCheckbox = IupToggle("Outbound", NULL),
-        IupLabel("Chance(%):"),
-        chanceInput = IupText(NULL),
-        NULL
-    );
-
-    IupSetAttribute(chanceInput, "VISIBLECOLUMNS", "4");
-    IupSetAttribute(chanceInput, "VALUE", "10.0");
-    IupSetCallback(chanceInput, "VALUECHANGED_CB", uiSyncChance);
-    IupSetAttribute(chanceInput, SYNCED_VALUE, (char*)&chance);
-    IupSetCallback(inboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(inboundCheckbox, SYNCED_VALUE, (char*)&oodInbound);
-    IupSetCallback(outboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(outboundCheckbox, SYNCED_VALUE, (char*)&oodOutbound);
-
-    // enable by default to avoid confusing
-    IupSetAttribute(inboundCheckbox, "VALUE", "ON");
-    IupSetAttribute(outboundCheckbox, "VALUE", "ON");
-
-    if (parameterized) {
-        setFromParameter(inboundCheckbox, "VALUE", NAME"-inbound");
-        setFromParameter(outboundCheckbox, "VALUE", NAME"-outbound");
-        setFromParameter(chanceInput, "VALUE", NAME"-chance");
-    }
-
-    return oodControlsBox;
-}
-
-static void oodStartUp() {
+static void oodStartUp(ModuleInst *inst, int64_t now) {
+    OodState *st = (OodState *)inst->state;
+    UNREFERENCED_PARAMETER(now);
+    assert(st->held == NULL);
+    st->held = NULL;
     LOG("ood enabled");
-    giveUpCnt = KEEP_TURNS_MAX;
-    // assert on the issue that repeatly enable/disable abort the program
-    assert(oodPacket == NULL);
 }
 
-static void oodCloseDown(PacketNode *head, PacketNode *tail) {
-    UNREFERENCED_PARAMETER(tail);
+static void oodCloseDown(ModuleInst *inst, PacketList *list) {
+    OodState *st = (OodState *)inst->state;
+    if (st->held != NULL) {
+        listPushBack(list, st->held);
+        st->held = NULL;
+    }
+    atomicExch32(&inst->stats.queued, 0);
     LOG("ood disabled");
-    if (oodPacket != NULL) {
-        insertAfter(oodPacket, head);
-        oodPacket = NULL; // ! need to empty the ood packet
-    }
 }
 
-// find the next packet fits the direction check or null
-static PacketNode* nextCorrectDirectionNode(PacketNode *p) {
-    if (p == NULL) {
-        return NULL;
+static PacketNode *nextMatching(OodState *st, PacketList *list, PacketNode *from) {
+    PacketNode *p = from ? listNext(list, from) : listFirst(list);
+    while (p != NULL && !scopeMatch(&st->scope, p)) {
+        p = listNext(list, p);
     }
-
-    do {
-        p = p->next;
-    } while (p->next != NULL && !checkDirection(p->addr.Outbound, oodInbound, oodOutbound));
-
-    return p->next == NULL ? NULL : p;
+    return p;
 }
 
-// not really perfect swap since it assumes a is before b
-static void swapNode(PacketNode *a, PacketNode *b) {
-    assert(a->prev && a->next && b->prev && b->next); // not accidentally swapping head/tail
-    assert(a != b); // treat swap self as error here since we shouldn't really be doing it
-    if (a->next == b) {
-        // adjacent nodes need special care
-        a->prev->next = b;
-        b->next->prev = a;
-        a->next = b->next;
-        b->prev = a->prev;
-        a->prev = b;
-        b->next = a;
-    } else {
-        PacketNode *pa = a->prev,
-                   *na = a->next,
-                   *pb = b->prev,
-                   *nb = b->next;
-        pa->next = na->prev = b;
-        b->prev = pa;
-        b->next = na;
-        pb->next = nb->prev = a;
-        a->prev = pb;
-        a->next = nb;
-    }
-}
+static short oodProcess(ModuleInst *inst, PacketList *list, int64_t now) {
+    OodState *st = (OodState *)inst->state;
+    PacketNode *pac, *first, *second;
+    short acted = 0;
 
-static short oodProcess(PacketNode *head, PacketNode *tail) {
-    if (oodPacket != NULL) {
-        if (!isListEmpty() || --giveUpCnt == 0) {
-            LOG("Ooo sent direction %s, is giveup %s", oodPacket->addr.Outbound ? "OUTBOUND" : "INBOUND", giveUpCnt ? "NO" : "YES");
-            insertAfter(oodPacket, head);
-            oodPacket = NULL;
-            giveUpCnt = KEEP_TURNS_MAX;
-        } // skip picking packets when having oodPacket already
-    } else if (!isListEmpty()) {
-        PacketNode *pac = head->next;
-        if (pac->next == tail) {
-            // only contains a single packet, then pick it out and insert later
-            if (checkDirection(pac->addr.Outbound, oodInbound, oodOutbound) && calcChance(chance)) {
-                oodPacket = popNode(pac);
-                LOG("Ooo picked packet w/ chance %.1f%%, direction %s", chance/100.0, pac->addr.Outbound ? "OUTBOUND" : "INBOUND");
-                return TRUE;
-            }
-        } else if (calcChance(chance)) {
-            // since there's already multiple packets in the queue, do a reorder will be enough
-            PacketNode *first = head, *second;
-            do {
-                first = nextCorrectDirectionNode(first);
-                second = nextCorrectDirectionNode(first);
-                // calculate chance per swap
-                if (first && second && calcChance(chance)) {
-                    swapNode(first, second);
-                    LOG("Multiple packets OOD swapping");
-                } else {
-                    // move forward first to progress
-                    first = second;
-                }
-            } while (first && second);
-            return TRUE;
+    if (st->held != NULL) {
+        // release behind whatever arrived since, or give up after a while
+        if (!listEmpty(list) || now - st->heldSince >= OOD_HOLD_MAX_US) {
+            LOG("ood releasing held %s packet", st->held->addr.Outbound ? "outbound" : "inbound");
+            listPushBack(list, st->held);
+            st->held = NULL;
+            atomicExch32(&inst->stats.queued, 0);
+        }
+        return 1;
+    }
+
+    if (listEmpty(list)) {
+        return 0;
+    }
+
+    if (listCount(list) == 1) {
+        pac = listFirst(list);
+        if (scopeMatch(&st->scope, pac) && rngChance(st->chance)) {
+            listUnlink(list, pac);
+            pac->flags |= PN_FLAG_REORDERED;
+            st->held = pac;
+            st->heldSince = now;
+            atomicAdd64(&inst->stats.packets, 1);
+            atomicAdd64(&inst->stats.bytes, pac->packetLen);
+            atomicExch32(&inst->stats.queued, 1);
+            LOG("ood holding one packet");
+            return 1;
+        }
+        return 0;
+    }
+
+    // several packets queued: swapping neighbours is enough
+    if (!rngChance(st->chance)) {
+        return 0;
+    }
+    first = nextMatching(st, list, NULL);
+    while (first != NULL) {
+        second = nextMatching(st, list, first);
+        if (second == NULL) break;
+        if (rngChance(st->chance)) {
+            listSwap(list, first, second);
+            first->flags |= PN_FLAG_REORDERED;
+            second->flags |= PN_FLAG_REORDERED;
+            atomicAdd64(&inst->stats.packets, 2);
+            acted = 1;
+            first = nextMatching(st, list, first);
+        } else {
+            first = second;
         }
     }
-
-    return FALSE;
+    return acted;
 }
 
-Module oodModule = {
-    "Out of order",
-    NAME,
-    (short*)&oodEnabled,
-    oodSetupUI,
-    oodStartUp,
-    oodCloseDown,
-    oodProcess,
-    // runtime fields
-    0, 0, NULL
+static int64_t oodNextDeadline(ModuleInst *inst, int64_t now) {
+    OodState *st = (OodState *)inst->state;
+    UNREFERENCED_PARAMETER(now);
+    return st->held ? st->heldSince + OOD_HOLD_MAX_US : -1;
+}
+
+const ModuleDesc oodModuleDesc = {
+    "Out of order", NAME, sizeof(OodState),
+    oodParams, (int)(sizeof(oodParams) / sizeof(oodParams[0])),
+    NULL, NULL, NULL,
+    oodStartUp, oodCloseDown, oodProcess, oodNextDeadline
 };

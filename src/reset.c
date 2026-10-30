@@ -1,126 +1,81 @@
-// Reset injection packet module
-#include <stdlib.h>
+// Set TCP RST: flag TCP packets with RST, by chance or on demand.
 #include "iup.h"
 #include "common.h"
+#include "uibind.h"
+
 #define NAME "reset"
 
-static const unsigned int TCP_MIN_SIZE = sizeof(WINDIVERT_IPHDR) + sizeof(WINDIVERT_TCPHDR);
+typedef struct {
+    ScopeState scope;
+    volatile short chance;        // [0, 10000]
+    volatile short setNextCount;  // RST the next N matching packets (button)
+} ResetState;
 
-static Ihandle *inboundCheckbox, *outboundCheckbox, *chanceInput, *rstButton;
+static const ParamDesc resetParams[] = {
+    SCOPE_PARAMS(ResetState),
+    { "chance", "Chance(%)", PT_CHANCE, offsetof(ResetState, chance), 0, 10000, 0, NULL, 0 },
+};
 
-static volatile short resetEnabled = 0,
-    resetInbound = 1, resetOutbound = 1,
-    chance = 0, // [0-10000]
-    setNextCount = 0;
-
-
-static int resetSetRSTNextButtonCb(Ihandle *ih) {
-    UNREFERENCED_PARAMETER(ih);
-
-    if (!(*resetModule.enabledFlag)) {
-        return IUP_DEFAULT;
-    }
-
-    InterlockedIncrement16(&setNextCount);
-
+static int resetNextButtonCb(Ihandle *ih) {
+    ModuleInst *inst = (ModuleInst *)IupGetAttribute(ih, UI_ATTR_INST);
+    ResetState *st = (ResetState *)inst->state;
+    if (!inst->enabled) return IUP_DEFAULT;
+    atomicInc16(&st->setNextCount);
     return IUP_DEFAULT;
 }
 
-static Ihandle* resetSetupUI() {
-    Ihandle *dupControlsBox = IupHbox(
-        rstButton = IupButton("RST next packet", NULL),
-        inboundCheckbox = IupToggle("Inbound", NULL),
-        outboundCheckbox = IupToggle("Outbound", NULL),
-        IupLabel("Chance(%):"),
-        chanceInput = IupText(NULL),
-        NULL
-        );
-
-    IupSetAttribute(chanceInput, "VISIBLECOLUMNS", "4");
-    IupSetAttribute(chanceInput, "VALUE", "0");
-    IupSetCallback(chanceInput, "VALUECHANGED_CB", uiSyncChance);
-    IupSetAttribute(chanceInput, SYNCED_VALUE, (char*)&chance);
-    IupSetCallback(inboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(inboundCheckbox, SYNCED_VALUE, (char*)&resetInbound);
-    IupSetCallback(outboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(outboundCheckbox, SYNCED_VALUE, (char*)&resetOutbound);
-    IupSetCallback(rstButton, "ACTION", resetSetRSTNextButtonCb);
-    IupSetAttribute(rstButton, "PADDING", "4x");
-
-    // enable by default to avoid confusing
-    IupSetAttribute(inboundCheckbox, "VALUE", "ON");
-    IupSetAttribute(outboundCheckbox, "VALUE", "ON");
-
-    if (parameterized) {
-        setFromParameter(inboundCheckbox, "VALUE", NAME"-inbound");
-        setFromParameter(outboundCheckbox, "VALUE", NAME"-outbound");
-        setFromParameter(chanceInput, "VALUE", NAME"-chance");
-    }
-
-    return dupControlsBox;
+static Ihandle *resetSetupUI(ModuleInst *inst) {
+    Ihandle *row = uiBuildParamRow(inst, 0);
+    Ihandle *button = IupButton("RST next packet", NULL);
+    IupSetAttribute(button, UI_ATTR_INST, (char *)inst);
+    IupSetAttribute(button, "PADDING", "4x");
+    IupSetCallback(button, "ACTION", resetNextButtonCb);
+    IupInsert(row, IupGetChild(row, 0), button);
+    return row;
 }
 
-static void resetStartup() {
+static void resetStartUp(ModuleInst *inst, int64_t now) {
+    ResetState *st = (ResetState *)inst->state;
+    UNREFERENCED_PARAMETER(now);
+    atomicExch16(&st->setNextCount, 0);
     LOG("reset enabled");
-    InterlockedExchange16(&setNextCount, 0);
 }
 
-static void resetCloseDown(PacketNode *head, PacketNode *tail) {
-    UNREFERENCED_PARAMETER(head);
-    UNREFERENCED_PARAMETER(tail);
+static void resetCloseDown(ModuleInst *inst, PacketList *list) {
+    ResetState *st = (ResetState *)inst->state;
+    UNREFERENCED_PARAMETER(list);
+    atomicExch16(&st->setNextCount, 0);
     LOG("reset disabled");
-    InterlockedExchange16(&setNextCount, 0);
 }
 
-static short resetProcess(PacketNode *head, PacketNode *tail) {
-    short reset = FALSE;
-    PacketNode *pac = head->next;
-    while (pac != tail) {
-        if (checkDirection(pac->addr.Outbound, resetInbound, resetOutbound)
-            && pac->packetLen > TCP_MIN_SIZE
-            && (setNextCount || calcChance(chance)))
-        {
-            PWINDIVERT_TCPHDR pTcpHdr;
-            WinDivertHelperParsePacket(
-                pac->packet,
-                pac->packetLen,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                &pTcpHdr,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                NULL);
-
-            if (pTcpHdr != NULL) {
-                LOG("injecting reset w/ chance %.1f%%", chance/100.0);
-                pTcpHdr->Rst = 1;
-                WinDivertHelperCalcChecksums(pac->packet, pac->packetLen, NULL, 0);
-
-                reset = TRUE;
-                if (setNextCount > 0) {
-                    InterlockedDecrement16(&setNextCount);
-                }
-            }
+static short resetProcess(ModuleInst *inst, PacketList *list, int64_t now) {
+    ResetState *st = (ResetState *)inst->state;
+    PacketNode *pac;
+    short reset = 0;
+    UNREFERENCED_PARAMETER(now);
+    for (pac = listFirst(list); pac != NULL; pac = listNext(list, pac)) {
+        PWINDIVERT_TCPHDR tcp = NULL;
+        if (!scopeMatch(&st->scope, pac)) continue;
+        if (!(st->setNextCount > 0 || rngChance(st->chance))) continue;
+        WinDivertHelperParsePacket(pac->packet, pac->packetLen, NULL, NULL, NULL, NULL, NULL, &tcp, NULL, NULL, NULL, NULL, NULL);
+        if (tcp == NULL) continue;
+        LOG("injecting RST with chance %.1f%%", st->chance / 100.0);
+        tcp->Rst = 1;
+        WinDivertHelperCalcChecksums(pac->packet, pac->packetLen, &pac->addr, 0);
+        pac->flags |= PN_FLAG_RST;
+        atomicAdd64(&inst->stats.packets, 1);
+        atomicAdd64(&inst->stats.bytes, pac->packetLen);
+        reset = 1;
+        if (st->setNextCount > 0) {
+            atomicDec16(&st->setNextCount);
         }
-        
-        pac = pac->next;
     }
     return reset;
 }
 
-Module resetModule = {
-    "Set TCP RST",
-    NAME,
-    (short*)&resetEnabled,
-    resetSetupUI,
-    resetStartup,
-    resetCloseDown,
-    resetProcess,
-    // runtime fields
-    0, 0, NULL
+const ModuleDesc resetModuleDesc = {
+    "Set TCP RST", NAME, sizeof(ResetState),
+    resetParams, (int)(sizeof(resetParams) / sizeof(resetParams[0])),
+    resetSetupUI, NULL, NULL,
+    resetStartUp, resetCloseDown, resetProcess, NULL
 };
