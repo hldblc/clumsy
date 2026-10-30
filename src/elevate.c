@@ -121,15 +121,30 @@ BOOL tryElevate(HWND hWnd, BOOL silent) {
         wchar_t szPath[MAX_PATH];
         if (GetModuleFileName(NULL, (LPSTR)szPath, ARRAYSIZE(szPath)))
         {
-            // Launch itself as administrator.
+            // Launch itself as administrator, forwarding the original arguments
+            // so flags like --api / --headless survive the UAC re-launch.
+            static char paramBuf[2048];
+            const char *cl = GetCommandLineA();
+            const char *p = cl;
             SHELLEXECUTEINFO sei = { sizeof(sei) };
+            if (*p == '"') {                       // skip a quoted exe path
+                ++p;
+                while (*p && *p != '"') ++p;
+                if (*p == '"') ++p;
+            } else {                               // skip an unquoted exe path
+                while (*p && *p != ' ' && *p != '\t') ++p;
+            }
+            while (*p == ' ' || *p == '\t') ++p;   // then any leading space
+            snprintf(paramBuf, sizeof(paramBuf), "%s", p);
+
             sei.lpVerb = (LPSTR)"runas";
             sei.lpFile = (LPSTR)szPath;
+            sei.lpParameters = paramBuf[0] ? (LPSTR)paramBuf : NULL;
             sei.hwnd = hWnd;
             sei.nShow = SW_NORMAL;
 
             // here it is restartintg the program using run as
-            LOG("Try elevating by runas");
+            LOG("Try elevating by runas, args: %s", paramBuf);
             if (!ShellExecuteEx(&sei))
             {
                 DWORD dwError = GetLastError();
