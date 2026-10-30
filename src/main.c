@@ -104,9 +104,75 @@ static Rule *currentRule(void) {
     return ruleSet.rules[pos];
 }
 
+static void updateFilterStatus(Rule *r) {
+    char err[MSG_BUFSIZE], msg[MSG_BUFSIZE];
+    const char *f;
+    if (r == NULL || r->filterStatus == NULL) return;
+    f = IupGetAttribute(r->filterText, "VALUE");
+    if (filterCheck(f ? f : "", err, sizeof(err))) {
+        IupSetAttribute(r->filterStatus, "FGCOLOR", "0 128 0");
+        IupSetStrAttribute(r->filterStatus, "TITLE", "\xE2\x9C\x93 valid");
+    } else {
+        snprintf(msg, sizeof(msg), "\xE2\x9C\x97 %s", err);
+        IupSetAttribute(r->filterStatus, "FGCOLOR", "208 70 72");
+        IupSetStrAttribute(r->filterStatus, "TITLE", msg);
+    }
+    IupRefresh(r->filterStatus);
+}
+
 static int uiFilterTextCb(Ihandle *ih) {
-    UNREFERENCED_PARAMETER(ih);
+    Rule *r = (Rule *)IupGetAttribute(ih, "_CLUMSY_RULE");
     IupSetAttribute(presetList, "VALUE", "0");
+    updateFilterStatus(r);
+    return IUP_DEFAULT;
+}
+
+// visual filter builder: a small dialog that assembles a WinDivert filter
+static int uiBuildFilterCb(Ihandle *ih) {
+    Rule *r = (Rule *)IupGetAttribute(ih, "_CLUMSY_RULE");
+    int proto = 0, dir = 0, port = 0;
+    char ip[64] = "";
+    char filter[FILTER_BUFSIZE] = "";
+    const char *protoName[] = { NULL, "tcp", "udp", "icmp" };
+    size_t used = 0;
+    int clauses = 0;
+    if (r == NULL) return IUP_DEFAULT;
+    if (!IupGetParam("Filter builder", NULL, NULL,
+            "Protocol: %l|any|tcp|udp|icmp|\n"
+            "Direction: %l|any|outbound|inbound|\n"
+            "Remote IP (optional): %s\n"
+            "Port (0 = any): %i\n",
+            &proto, &dir, ip, &port, NULL)) {
+        return IUP_DEFAULT;
+    }
+#define ADD(...) do { \
+        int w = snprintf(filter + used, sizeof(filter) - used, clauses ? " and %s" : "%s", __VA_ARGS__); \
+        if (w > 0 && (size_t)w < sizeof(filter) - used) { used += (size_t)w; ++clauses; } \
+    } while (0)
+    if (proto >= 1 && proto <= 3) ADD(protoName[proto]);
+    if (dir == 1) ADD("outbound");
+    else if (dir == 2) ADD("inbound");
+    if (ip[0]) {
+        char clause[160];
+        snprintf(clause, sizeof(clause), "(ip.DstAddr == %s or ip.SrcAddr == %s)", ip, ip);
+        ADD(clause);
+    }
+    if (port > 0 && port <= 65535) {
+        char clause[160];
+        const char *pp = (proto == 1) ? "tcp" : (proto == 2) ? "udp" : "tcp or udp, use";
+        UNREFERENCED_PARAMETER(pp);
+        if (proto == 1 || proto == 2) {
+            snprintf(clause, sizeof(clause), "(%s.DstPort == %d or %s.SrcPort == %d)", protoName[proto], port, protoName[proto], port);
+        } else {
+            snprintf(clause, sizeof(clause), "(tcp.DstPort == %d or tcp.SrcPort == %d or udp.DstPort == %d or udp.SrcPort == %d)", port, port, port, port);
+        }
+        ADD(clause);
+    }
+#undef ADD
+    if (clauses == 0) snprintf(filter, sizeof(filter), "outbound");
+    IupStoreAttribute(r->filterText, "VALUE", filter);
+    IupSetAttribute(presetList, "VALUE", "0");
+    updateFilterStatus(r);
     return IUP_DEFAULT;
 }
 
@@ -119,21 +185,28 @@ static int uiRuleEnabledCb(Ihandle *ih, int state) {
 
 static void uiAddRuleTab(Rule *r) {
     Ihandle *filterText, *enabledToggle, *filterRow, *procRow, *procText, *procLabel;
-    Ihandle *modulesVbox, *functionsFrame, *tab, *label, *tabBox;
+    Ihandle *modulesVbox, *functionsFrame, *tab, *label, *tabBox, *buildButton, *filterStatus;
     int i;
 
     label = IupLabel("Filter:");
     filterText = IupText(NULL);
     IupSetAttribute(filterText, "EXPAND", "HORIZONTAL");
     IupStoreAttribute(filterText, "VALUE", r->filter);
+    IupSetAttribute(filterText, "_CLUMSY_RULE", (char *)r);
     IupSetCallback(filterText, "VALUECHANGED_CB", uiFilterTextCb);
+    buildButton = IupButton("Build...", NULL);
+    IupSetAttribute(buildButton, "PADDING", "4x");
+    IupSetAttribute(buildButton, "_CLUMSY_RULE", (char *)r);
+    IupSetCallback(buildButton, "ACTION", uiBuildFilterCb);
     enabledToggle = IupToggle("Enabled", NULL);
     IupSetAttribute(enabledToggle, "VALUE", r->enabled ? "ON" : "OFF");
     IupSetAttribute(enabledToggle, "_CLUMSY_RULE", (char *)r);
     IupSetCallback(enabledToggle, "ACTION", (Icallback)uiRuleEnabledCb);
-    filterRow = IupHbox(label, filterText, enabledToggle, NULL);
+    filterRow = IupHbox(label, filterText, buildButton, enabledToggle, NULL);
     IupSetAttribute(filterRow, "ALIGNMENT", "ACENTER");
     IupSetAttribute(filterRow, "GAP", "4");
+    filterStatus = IupLabel("");
+    r->filterStatus = filterStatus;
 
     procLabel = IupLabel("Process (optional, e.g. game.exe):");
     procText = IupText(NULL);
@@ -154,7 +227,7 @@ static void uiAddRuleTab(Rule *r) {
     IupSetAttribute(functionsFrame, "TITLE", "Functions");
     IupSetAttribute(functionsFrame, "EXPAND", "HORIZONTAL");
 
-    tabBox = IupVbox(filterRow, procRow, functionsFrame, NULL);
+    tabBox = IupVbox(filterRow, filterStatus, procRow, functionsFrame, NULL);
     tab = tabBox;
     IupSetAttribute(tab, "NCMARGIN", "4x4");
     IupSetAttribute(tab, "NCGAP", "4x4");
@@ -167,6 +240,7 @@ static void uiAddRuleTab(Rule *r) {
         IupMap(tab);
         IupRefresh(tabs);
     }
+    updateFilterStatus(r);
 }
 
 static int uiAddRuleCb(Ihandle *ih) {

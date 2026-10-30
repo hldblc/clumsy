@@ -94,6 +94,23 @@ int ruleSetAnyProcess(void) {
     return 0;
 }
 
+int filterCheck(const char *filter, char *err, size_t errSize) {
+    const char *errStr = NULL;
+    UINT errPos = 0;
+    const char *f = filter;
+    char object[FILTER_OBJ_SIZE];
+    while (*f == ' ' || *f == '\t') ++f;
+    if (*f == 0) {
+        snprintf(err, errSize, "filter is empty");
+        return 0;
+    }
+    if (!WinDivertHelperCompileFilter(filter, WINDIVERT_LAYER_NETWORK, object, sizeof(object), &errStr, &errPos)) {
+        snprintf(err, errSize, "error at position %u: %s", errPos, errStr ? errStr : "invalid filter");
+        return 0;
+    }
+    return 1;
+}
+
 int ruleCompile(Rule *r, char *err, size_t errSize) {
     const char *errStr = NULL;
     UINT errPos = 0;

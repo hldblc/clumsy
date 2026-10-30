@@ -22,7 +22,7 @@ struct Rule {
     int moduleCount;
     volatile LONG64 matched, bytesMatched;
     // UI handles owned by main.c
-    Ihandle *tab, *filterText, *enabledToggle, *processText;
+    Ihandle *tab, *filterText, *enabledToggle, *processText, *filterStatus;
 };
 
 typedef struct {
@@ -39,6 +39,7 @@ void ruleSetRemove(int index);            // destroys the rule
 void ruleSetClear(void);
 int  ruleSetEnabledCount(void);
 int  ruleCompile(Rule *r, char *err, size_t errSize);
+int  filterCheck(const char *filter, char *err, size_t errSize);  // 1 valid, 0 with message
 int  ruleSetBuildUnionFilter(char *buf, size_t size);   // number of enabled rules
 Rule *ruleSetMatch(const void *packet, UINT len, const WINDIVERT_ADDRESS *addr);
 int  ruleSetAnyProcess(void);                           // any enabled rule scoped to a process?

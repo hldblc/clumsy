@@ -839,6 +839,17 @@ static void testRules(void) {
     ruleDestroy(bad);
     packetFree(p5000);
     packetFree(p6000);
+
+    // live filter validation helper
+    {
+        char e[256];
+        CHECK(filterCheck("tcp and outbound", e, sizeof(e)));
+        CHECK(filterCheck("udp.DstPort == 80", e, sizeof(e)));
+        CHECK(!filterCheck("", e, sizeof(e)));
+        CHECK(!filterCheck("   ", e, sizeof(e)));
+        CHECK(!filterCheck("tcp and and", e, sizeof(e)));
+        CHECK(!filterCheck("notafield == 1", e, sizeof(e)));
+    }
 }
 
 void testModules(void) {
