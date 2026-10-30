@@ -2,15 +2,18 @@
 #include "rules.h"
 
 extern const ModuleDesc lagModuleDesc, dropModuleDesc, throttleModuleDesc, dupModuleDesc,
-    oodModuleDesc, tamperModuleDesc, resetModuleDesc, bandwidthModuleDesc;
+    oodModuleDesc, tamperModuleDesc, resetModuleDesc, bandwidthModuleDesc,
+    tcpModuleDesc, outageModuleDesc;
 
 // Processing order: a packet walks this chain from first to last.
 const ModuleDesc *const moduleDescs[] = {
+    &outageModuleDesc,
     &lagModuleDesc,
     &dropModuleDesc,
     &throttleModuleDesc,
     &dupModuleDesc,
     &oodModuleDesc,
+    &tcpModuleDesc,
     &tamperModuleDesc,
     &resetModuleDesc,
     &bandwidthModuleDesc,

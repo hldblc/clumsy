@@ -52,6 +52,45 @@ static uint16_t srcPortOf(PacketNode *n) {
     return udp ? WinDivertHelperNtohs(udp->SrcPort) : 0;
 }
 
+// synthetic TCP segment; optLen pads the TCP header with that many option bytes
+static PacketNode *mkTcp(uint16_t srcPort, uint16_t dstPort, uint32_t seq, int payloadLen,
+                         int syn, int ack, int fin, int outbound, int optLen, uint16_t window) {
+    unsigned char buf[4096];
+    UINT hdr = 20 + (UINT)optLen;
+    UINT len = 20 + hdr + (UINT)payloadLen;
+    PWINDIVERT_IPHDR ip = (PWINDIVERT_IPHDR)buf;
+    PWINDIVERT_TCPHDR tcp = (PWINDIVERT_TCPHDR)(buf + 20);
+    WINDIVERT_ADDRESS addr;
+    PacketNode *n;
+    int i;
+    memset(buf, 0, len);
+    ip->Version = 4;
+    ip->HdrLength = 5;
+    ip->Length = WinDivertHelperHtons((UINT16)len);
+    ip->TTL = 64;
+    ip->Protocol = 6;
+    ip->SrcAddr = WinDivertHelperHtonl(0x0A000001);
+    ip->DstAddr = WinDivertHelperHtonl(0x0A000002);
+    tcp->SrcPort = WinDivertHelperHtons(srcPort);
+    tcp->DstPort = WinDivertHelperHtons(dstPort);
+    tcp->SeqNum = WinDivertHelperHtonl(seq);
+    tcp->HdrLength = (UINT16)(hdr / 4);
+    tcp->Syn = syn ? 1 : 0;
+    tcp->Ack = ack ? 1 : 0;
+    tcp->Fin = fin ? 1 : 0;
+    tcp->Window = WinDivertHelperHtons(window);
+    for (i = 0; i < optLen; ++i) buf[40 + i] = (unsigned char)(0x01); // NOP options
+    for (i = 0; i < payloadLen; ++i) buf[20 + hdr + i] = (unsigned char)(i + 1);
+    WinDivertHelperCalcChecksums(buf, len, NULL, 0);
+    memset(&addr, 0, sizeof(addr));
+    addr.Outbound = outbound ? 1 : 0;
+    addr.Layer = WINDIVERT_LAYER_NETWORK;
+    n = packetAlloc(buf, len, &addr);
+    n->captureTime = T0;
+    n->flowHash = ((uint64_t)srcPort << 16) | dstPort;
+    return n;
+}
+
 static int checksumsValid(PacketNode *n) {
     unsigned char copy[4096];
     memcpy(copy, n->packet, n->packetLen);
@@ -500,6 +539,132 @@ static void testFlowScope(void) {
     ruleDestroy(r);
 }
 
+// ---- tcp ----
+static int tcpHdrLen(PacketNode *n) {
+    PWINDIVERT_TCPHDR tcp = NULL;
+    WinDivertHelperParsePacket(n->packet, n->packetLen, NULL, NULL, NULL, NULL, NULL, &tcp, NULL, NULL, NULL, NULL, NULL);
+    return tcp ? tcp->HdrLength * 4 : -1;
+}
+static int tcpWindow(PacketNode *n) {
+    PWINDIVERT_TCPHDR tcp = NULL;
+    WinDivertHelperParsePacket(n->packet, n->packetLen, NULL, NULL, NULL, NULL, NULL, &tcp, NULL, NULL, NULL, NULL, NULL);
+    return tcp ? WinDivertHelperNtohs(tcp->Window) : -1;
+}
+
+static void testTcp(void) {
+    Rule *r = ruleCreate("t", "tcp");
+    ModuleInst *tcp = ruleFindModule(r, "tcp");
+    PacketList l;
+    PacketNode *n;
+    int valid;
+    listInit(&l);
+    CHECK(tcp != NULL);
+
+    // drop SYN
+    CHECK(moduleSetParamText(tcp, "syn", "100"));
+    listPushBack(&l, mkTcp(100, 80, 0, 0, 1, 0, 0, 1, 0, 8192));   // SYN
+    listPushBack(&l, mkTcp(100, 80, 1, 50, 0, 1, 0, 1, 0, 8192));  // data
+    runStep(tcp, &l, T0);
+    CHECK_EQ(listCount(&l), 1);                 // only the SYN is gone
+    listFreeAll(&l);
+    CHECK(moduleSetParamText(tcp, "syn", "0"));
+
+    // drop pure ACK but keep ACKs that carry data
+    CHECK(moduleSetParamText(tcp, "ack", "100"));
+    listPushBack(&l, mkTcp(101, 80, 1, 0, 0, 1, 0, 1, 0, 8192));   // pure ACK
+    listPushBack(&l, mkTcp(101, 80, 1, 50, 0, 1, 0, 1, 0, 8192));  // ACK with data
+    runStep(tcp, &l, T0);
+    CHECK_EQ(listCount(&l), 1);
+    listFreeAll(&l);
+    CHECK(moduleSetParamText(tcp, "ack", "0"));
+
+    // clamp the advertised window
+    CHECK(moduleSetParamText(tcp, "window", "500"));
+    n = mkTcp(102, 80, 1, 10, 0, 1, 0, 1, 0, 60000);
+    listPushBack(&l, n);
+    runStep(tcp, &l, T0);
+    CHECK_EQ(tcpWindow(n), 500);
+    valid = WinDivertHelperCalcChecksums(n->packet, n->packetLen, NULL, 0);  // already valid -> returns nonzero but unchanged
+    CHECK(valid);
+    listFreeAll(&l);
+    CHECK(moduleSetParamText(tcp, "window", "0"));
+
+    // strip options from a SYN: header shrinks to 20 bytes, length stays consistent
+    CHECK(moduleSetParamText(tcp, "strip", "on"));
+    n = mkTcp(103, 80, 0, 0, 1, 0, 0, 1, 12, 8192);
+    CHECK_EQ(tcpHdrLen(n), 32);
+    listPushBack(&l, n);
+    runStep(tcp, &l, T0);
+    CHECK_EQ(tcpHdrLen(n), 20);
+    {
+        PWINDIVERT_IPHDR ip = NULL;
+        WinDivertHelperParsePacket(n->packet, n->packetLen, &ip, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+        CHECK_EQ(WinDivertHelperNtohs(ip->Length), n->packetLen);
+    }
+    listFreeAll(&l);
+    CHECK(moduleSetParamText(tcp, "strip", "off"));
+
+    // delay retransmissions: the first copy passes, the re-sent one is held
+    CHECK(moduleSetParamText(tcp, "retrans", "100"));
+    listPushBack(&l, mkTcp(104, 80, 1000, 100, 0, 1, 0, 1, 0, 8192));
+    runStep(tcp, &l, T0);
+    CHECK_EQ(listCount(&l), 1);                 // new data passes
+    listFreeAll(&l);
+    listPushBack(&l, mkTcp(104, 80, 1000, 100, 0, 1, 0, 1, 0, 8192));  // same seq again
+    runStep(tcp, &l, T0 + 1000);
+    CHECK(listEmpty(&l));                        // retransmit held
+    CHECK_EQ(tcp->stats.queued, 1);
+    runStep(tcp, &l, T0 + 101000);
+    CHECK_EQ(listCount(&l), 1);                  // released after the delay
+    listFreeAll(&l);
+    stopModule(tcp, &l);
+    listFreeAll(&l);
+    ruleDestroy(r);
+}
+
+// ---- outage ----
+static void testOutage(void) {
+    Rule *r = ruleCreate("t", "udp");
+    ModuleInst *out = ruleFindModule(r, "outage");
+    PacketList l;
+    listInit(&l);
+    CHECK(out != NULL);
+    CHECK(moduleSetParamText(out, "mode", "periodic"));
+    CHECK(moduleSetParamText(out, "up", "100"));      // 100 ms up
+    CHECK(moduleSetParamText(out, "down", "50"));     // 50 ms down
+    CHECK(moduleSetParamText(out, "startdown", "off"));
+
+    // starts up: traffic passes
+    fill(&l, 5, 1);
+    runStep(out, &l, T0);
+    CHECK_EQ(listCount(&l), 5);
+    CHECK_EQ(out->desc->nextDeadline(out, T0), T0 + 100000);
+    listFreeAll(&l);
+
+    // during the down phase everything is dropped
+    fill(&l, 5, 1);
+    runStep(out, &l, T0 + 120000);   // 120 ms: into the first down phase (100..150)
+    CHECK(listEmpty(&l));
+    CHECK_EQ(out->stats.dropped, 5);
+    listFreeAll(&l);
+
+    // recovers afterwards (150..250 is up)
+    fill(&l, 5, 1);
+    runStep(out, &l, T0 + 200000);
+    CHECK_EQ(listCount(&l), 5);
+    listFreeAll(&l);
+    stopModule(out, &l);
+
+    // start-down flag
+    CHECK(moduleSetParamText(out, "startdown", "on"));
+    fill(&l, 3, 1);
+    runStep(out, &l, T0);
+    CHECK(listEmpty(&l));
+    listFreeAll(&l);
+    stopModule(out, &l);
+    ruleDestroy(r);
+}
+
 // ---- rules ----
 static void testRules(void) {
     char err[256], uni[4096];
@@ -542,6 +707,8 @@ void testModules(void) {
     testDuplicate();
     testOod();
     testTamper();
+    testTcp();
+    testOutage();
     testFlowScope();
     testRules();
 }
