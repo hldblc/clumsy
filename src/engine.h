@@ -33,3 +33,6 @@ void engineDescribeOpenError(DWORD code, char *buf, size_t size);
 // safety watchdog: if the processor stalls this long while running, the divert
 // handle is force-closed so the OS restores normal traffic. 0 disables it.
 void engineSetWatchdog(int seconds);
+
+// canonical 5-tuple hash of a raw IP packet; safe on unaligned buffers
+uint64_t engineFlowHash(const void *packet, UINT len);

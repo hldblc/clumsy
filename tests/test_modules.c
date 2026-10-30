@@ -13,6 +13,7 @@
 #include "pcap.h"
 #include "remote.h"
 #include "targets.h"
+#include "engine.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -1151,8 +1152,48 @@ static void testTargets(void) {
     CHECK(!targetBuildClause("1.2.3.4/99", out, sizeof(out)));
 }
 
+// ---- flow hash on unaligned buffers (regression for the live crash) ----
+// The test binary is a zig Debug build, so UBSan traps are on: a direct
+// misaligned load inside engineFlowHash would kill this process.
+static void testFlowHashAlignment(void) {
+    PacketNode *n = mkUdp(5000, 53, 20, 1);
+    static unsigned char raw[4096];
+    uint64_t h0 = engineFlowHash(n->packet, n->packetLen);
+    int off;
+    CHECK(h0 != 0);
+    // the same bytes at every odd offset, as they land in a batch buffer
+    for (off = 1; off <= 15; off += 2) {
+        memcpy(raw + off, n->packet, n->packetLen);
+        CHECK(engineFlowHash(raw + off, n->packetLen) == h0);
+    }
+    // the reply direction (addresses and ports swapped) hashes the same
+    {
+        unsigned char rev[128];
+        UINT32 sa, da;
+        UINT16 sp, dp;
+        memcpy(rev, n->packet, n->packetLen);
+        memcpy(&sa, rev + 12, 4); memcpy(&da, rev + 16, 4);
+        memcpy(rev + 12, &da, 4); memcpy(rev + 16, &sa, 4);
+        memcpy(&sp, rev + 20, 2); memcpy(&dp, rev + 22, 2);
+        memcpy(rev + 20, &dp, 2); memcpy(rev + 22, &sp, 2);
+        CHECK(engineFlowHash(rev, n->packetLen) == h0);
+        // the reversed packet at an odd offset too (fresh copy: the loop above
+        // overlapped its earlier copies)
+        memcpy(raw + 3, rev, n->packetLen);
+        CHECK(engineFlowHash(raw + 3, n->packetLen) == h0);
+    }
+    // a different port is a different flow
+    {
+        PacketNode *o = mkUdp(5001, 53, 20, 1);
+        CHECK(engineFlowHash(o->packet, o->packetLen) != h0);
+        packetFree(o);
+    }
+    packetFree(n);
+}
+
 void testModules(void) {
     rngSeed(777);
+    testFlowHashAlignment();
     testLagFixed();
     testLagJitter();
     testDrop();

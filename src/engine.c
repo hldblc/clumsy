@@ -91,7 +91,14 @@ static int tupleCompare(const UINT32 *a, UINT16 pa, const UINT32 *b, UINT16 pb) 
     return (int)pa - (int)pb;
 }
 
-static uint64_t flowHashOf(const void *packet, UINT len) {
+// Canonical, direction-independent 5-tuple hash.
+//
+// Header fields are read with memcpy at explicit offsets, never through the
+// header structs: in a WinDivertRecvEx batch every packet after the first
+// starts at an arbitrary byte offset, and a direct 4-byte load through such a
+// pointer is undefined behaviour that UBSan (on in zig Debug/ReleaseSafe
+// builds) turns into an illegal-instruction trap. That was the live crash.
+uint64_t engineFlowHash(const void *packet, UINT len) {
     PWINDIVERT_IPHDR ip = NULL;
     PWINDIVERT_IPV6HDR ip6 = NULL;
     PWINDIVERT_TCPHDR tcp = NULL;
@@ -100,20 +107,25 @@ static uint64_t flowHashOf(const void *packet, UINT len) {
     UINT32 a[4] = { 0, 0, 0, 0 }, b[4] = { 0, 0, 0, 0 };
     UINT16 pa = 0, pb = 0;
     uint64_t h = 14695981039346656037ULL;
+    const unsigned char *hdr;
     WinDivertHelperParsePacket(packet, len, &ip, &ip6, &proto, NULL, NULL, &tcp, &udp, NULL, NULL, NULL, NULL);
     if (ip) {
-        a[0] = ip->SrcAddr;
-        b[0] = ip->DstAddr;
+        hdr = (const unsigned char *)ip;
+        memcpy(&a[0], hdr + offsetof(WINDIVERT_IPHDR, SrcAddr), 4);
+        memcpy(&b[0], hdr + offsetof(WINDIVERT_IPHDR, DstAddr), 4);
     } else if (ip6) {
-        memcpy(a, ip6->SrcAddr, 16);
-        memcpy(b, ip6->DstAddr, 16);
+        hdr = (const unsigned char *)ip6;
+        memcpy(a, hdr + offsetof(WINDIVERT_IPV6HDR, SrcAddr), 16);
+        memcpy(b, hdr + offsetof(WINDIVERT_IPV6HDR, DstAddr), 16);
     }
     if (tcp) {
-        pa = tcp->SrcPort;
-        pb = tcp->DstPort;
+        hdr = (const unsigned char *)tcp;
+        memcpy(&pa, hdr + offsetof(WINDIVERT_TCPHDR, SrcPort), 2);
+        memcpy(&pb, hdr + offsetof(WINDIVERT_TCPHDR, DstPort), 2);
     } else if (udp) {
-        pa = udp->SrcPort;
-        pb = udp->DstPort;
+        hdr = (const unsigned char *)udp;
+        memcpy(&pa, hdr + offsetof(WINDIVERT_UDPHDR, SrcPort), 2);
+        memcpy(&pb, hdr + offsetof(WINDIVERT_UDPHDR, DstPort), 2);
     }
     if (tupleCompare(a, pa, b, pb) > 0) {
         // canonical order so both directions of a connection hash alike
@@ -186,7 +198,8 @@ static DWORD WINAPI captureLoop(LPVOID arg) {
             node = packetAlloc(p, pktLen, &addrs[i]);
             if (node != NULL) {
                 node->captureTime = now;
-                node->flowHash = flowHashOf(p, pktLen);
+                // hash the pooled (16-byte aligned) copy, not the batch buffer
+                node->flowHash = engineFlowHash(node->packet, pktLen);
                 enqueue(node);
             } else {
                 atomicAdd64(&engineStats.allocFailed, 1);
