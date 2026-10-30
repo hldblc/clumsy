@@ -1,0 +1,11 @@
+# Example clumsy scenario: a mobile handoff then recovery.
+# Format: <time_ms> <key=value> ...   applied to every rule.
+# Lines starting with # are comments; a line "loop" repeats the timeline.
+
+0      lag=on lag.time=40 lag.jitter=10 lag.dist=normal
+5000   lag.time=180 lag.jitter=80 drop=on drop.chance=2
+10000  outage=on outage.mode=periodic outage.down=1500 outage.up=1
+12000  outage=off lag.time=220 lag.jitter=120
+18000  drop.chance=0 lag.time=40 lag.jitter=10
+# uncomment to repeat:
+# loop

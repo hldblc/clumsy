@@ -1,0 +1,40 @@
+// Portable atomic helpers. clang/gcc (zig cc, mingw) lack the Interlocked*16
+// imports, so map to compiler builtins there and to the Interlocked family on MSVC.
+#pragma once
+#include <windows.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define atomicLoad16(p)      __atomic_load_n((volatile short *)(p), __ATOMIC_SEQ_CST)
+#define atomicExch16(p, v)   __atomic_exchange_n((volatile short *)(p), (short)(v), __ATOMIC_SEQ_CST)
+#define atomicInc16(p)       __atomic_add_fetch((volatile short *)(p), (short)1, __ATOMIC_SEQ_CST)
+#define atomicDec16(p)       __atomic_sub_fetch((volatile short *)(p), (short)1, __ATOMIC_SEQ_CST)
+#define atomicAnd16(p, v)    __atomic_and_fetch((volatile short *)(p), (short)(v), __ATOMIC_SEQ_CST)
+#define atomicLoad32(p)      __atomic_load_n((volatile LONG *)(p), __ATOMIC_SEQ_CST)
+#define atomicExch32(p, v)   __atomic_exchange_n((volatile LONG *)(p), (LONG)(v), __ATOMIC_SEQ_CST)
+#define atomicInc32(p)       __atomic_add_fetch((volatile LONG *)(p), (LONG)1, __ATOMIC_SEQ_CST)
+#define atomicDec32(p)       __atomic_sub_fetch((volatile LONG *)(p), (LONG)1, __ATOMIC_SEQ_CST)
+#define atomicAdd32(p, v)    __atomic_add_fetch((volatile LONG *)(p), (LONG)(v), __ATOMIC_SEQ_CST)
+#define atomicLoad64(p)      __atomic_load_n((volatile LONG64 *)(p), __ATOMIC_SEQ_CST)
+#define atomicExch64(p, v)   __atomic_exchange_n((volatile LONG64 *)(p), (LONG64)(v), __ATOMIC_SEQ_CST)
+#define atomicAdd64(p, v)    __atomic_add_fetch((volatile LONG64 *)(p), (LONG64)(v), __ATOMIC_SEQ_CST)
+#define atomicLoadPtr(p)     __atomic_load_n((void *volatile *)(p), __ATOMIC_SEQ_CST)
+#define atomicExchPtr(p, v)  __atomic_exchange_n((void *volatile *)(p), (void *)(v), __ATOMIC_SEQ_CST)
+#define atomicFence()        __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#else
+#define atomicLoad16(p)      ((short)InterlockedCompareExchange16((volatile SHORT *)(p), 0, 0))
+#define atomicExch16(p, v)   InterlockedExchange16((volatile SHORT *)(p), (SHORT)(v))
+#define atomicInc16(p)       InterlockedIncrement16((volatile SHORT *)(p))
+#define atomicDec16(p)       InterlockedDecrement16((volatile SHORT *)(p))
+#define atomicAnd16(p, v)    InterlockedAnd16((volatile SHORT *)(p), (SHORT)(v))
+#define atomicLoad32(p)      InterlockedCompareExchange((volatile LONG *)(p), 0, 0)
+#define atomicExch32(p, v)   InterlockedExchange((volatile LONG *)(p), (LONG)(v))
+#define atomicInc32(p)       InterlockedIncrement((volatile LONG *)(p))
+#define atomicDec32(p)       InterlockedDecrement((volatile LONG *)(p))
+#define atomicAdd32(p, v)    InterlockedAdd((volatile LONG *)(p), (LONG)(v))
+#define atomicLoad64(p)      InterlockedCompareExchange64((volatile LONG64 *)(p), 0, 0)
+#define atomicExch64(p, v)   InterlockedExchange64((volatile LONG64 *)(p), (LONG64)(v))
+#define atomicAdd64(p, v)    InterlockedAdd64((volatile LONG64 *)(p), (LONG64)(v))
+#define atomicLoadPtr(p)     InterlockedCompareExchangePointer((void *volatile *)(p), NULL, NULL)
+#define atomicExchPtr(p, v)  InterlockedExchangePointer((void *volatile *)(p), (void *)(v))
+#define atomicFence()        MemoryBarrier()
+#endif

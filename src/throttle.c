@@ -1,168 +1,98 @@
-// throttling packets
-#include "iup.h"
+// Throttle: with some chance, start holding packets for a time frame, then
+// release them all at once (or drop them).
 #include "common.h"
+
 #define NAME "throttle"
-#define TIME_MIN "0"
-#define TIME_MAX "1000"
-#define TIME_DEFAULT 30
-// threshold for how many packet to throttle at most
-#define KEEP_AT_MOST 1000
+#define THROTTLE_KEEP_AT_MOST 1000
 
-static Ihandle *inboundCheckbox, *outboundCheckbox, *chanceInput, *frameInput, *dropThrottledCheckbox;
+typedef struct {
+    ScopeState scope;
+    volatile short dropThrottled;
+    volatile short frame;     // ms
+    volatile short chance;    // [0, 10000]
+    PacketList buf;
+    int64_t startTime;        // 0 when not throttling
+} ThrottleState;
 
-static volatile short throttleEnabled = 0,
-    throttleInbound = 1, throttleOutbound = 1,
-    chance = 1000, // [0-10000]
-    // time frame in ms, when a throttle start the packets within the time 
-    // will be queued and sent altogether when time is over
-    throttleFrame = TIME_DEFAULT,
-    dropThrottled = 0; 
+static const ParamDesc throttleParams[] = {
+    { "drop",  "Drop Throttled", PT_BOOL, offsetof(ThrottleState, dropThrottled), 0, 1, 0, NULL, 0 },
+    { "frame", "Timeframe(ms)",  PT_INT,  offsetof(ThrottleState, frame), 0, 1000, 30, NULL, 0 },
+    SCOPE_PARAMS(ThrottleState),
+    { "chance", "Chance(%)", PT_CHANCE, offsetof(ThrottleState, chance), 0, 10000, 1000, NULL, 0 },
+};
 
-static PacketNode throttleHeadNode = {0}, throttleTailNode = {0};
-static PacketNode *bufHead = &throttleHeadNode, *bufTail = &throttleTailNode;
-static int bufSize = 0;
-static DWORD throttleStartTick = 0;
-
-static INLINE_FUNCTION short isBufEmpty() {
-    short ret = bufHead->next == bufTail;
-    if (ret) assert(bufSize == 0);
-    return ret;
+static void throttleInit(ModuleInst *inst) {
+    ThrottleState *st = (ThrottleState *)inst->state;
+    listInit(&st->buf);
 }
 
-static Ihandle *throttleSetupUI() {
-    Ihandle *throttleControlsBox = IupHbox(
-        dropThrottledCheckbox = IupToggle("Drop Throttled", NULL),
-        IupLabel("Timeframe(ms):"),
-        frameInput = IupText(NULL),
-        inboundCheckbox = IupToggle("Inbound", NULL),
-        outboundCheckbox = IupToggle("Outbound", NULL),
-        IupLabel("Chance(%):"),
-        chanceInput = IupText(NULL),
-        NULL
-        );
-
-    IupSetAttribute(chanceInput, "VISIBLECOLUMNS", "4");
-    IupSetAttribute(chanceInput, "VALUE", "10.0");
-    IupSetCallback(chanceInput, "VALUECHANGED_CB", uiSyncChance);
-    IupSetAttribute(chanceInput, SYNCED_VALUE, (char*)&chance);
-    IupSetCallback(inboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(inboundCheckbox, SYNCED_VALUE, (char*)&throttleInbound);
-    IupSetCallback(outboundCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(outboundCheckbox, SYNCED_VALUE, (char*)&throttleOutbound);
-    IupSetCallback(dropThrottledCheckbox, "ACTION", (Icallback)uiSyncToggle);
-    IupSetAttribute(dropThrottledCheckbox, SYNCED_VALUE, (char*)&dropThrottled);
-
-    // sync throttle packet number
-    IupSetAttribute(frameInput, "VISIBLECOLUMNS", "3");
-    IupSetAttribute(frameInput, "VALUE", STR(TIME_DEFAULT));
-    IupSetCallback(frameInput, "VALUECHANGED_CB", (Icallback)uiSyncInteger);
-    IupSetAttribute(frameInput, SYNCED_VALUE, (char*)&throttleFrame);
-    IupSetAttribute(frameInput, INTEGER_MAX, TIME_MAX);
-    IupSetAttribute(frameInput, INTEGER_MIN, TIME_MIN);
-
-    // enable by default to avoid confusing
-    IupSetAttribute(inboundCheckbox, "VALUE", "ON");
-    IupSetAttribute(outboundCheckbox, "VALUE", "ON");
-
-    if (parameterized) {
-        setFromParameter(inboundCheckbox, "VALUE", NAME"-inbound");
-        setFromParameter(outboundCheckbox, "VALUE", NAME"-outbound");
-        setFromParameter(chanceInput, "VALUE", NAME"-chance");
-        setFromParameter(frameInput, "VALUE", NAME"-frame");
-    }
-
-    return throttleControlsBox;
+static void throttleStartUp(ModuleInst *inst, int64_t now) {
+    ThrottleState *st = (ThrottleState *)inst->state;
+    UNREFERENCED_PARAMETER(now);
+    listEnsureInit(&st->buf);
+    assert(listEmpty(&st->buf));
+    st->startTime = 0;
 }
 
-static void throttleStartUp() {
-    if (bufHead->next == NULL && bufTail->next == NULL) {
-        bufHead->next = bufTail;
-        bufTail->prev = bufHead;
-        bufSize = 0;
-    } else {
-        assert(isBufEmpty());
-    }
-    throttleStartTick = 0;
-    startTimePeriod();
+static void throttleCloseDown(ModuleInst *inst, PacketList *list) {
+    ThrottleState *st = (ThrottleState *)inst->state;
+    LOG("closing throttle, releasing %d packets", listCount(&st->buf));
+    listAppendAll(list, &st->buf);
+    st->startTime = 0;
+    atomicExch32(&inst->stats.queued, 0);
 }
 
-static void clearBufPackets(PacketNode *tail) {
-    PacketNode *oldLast = tail->prev;
-    LOG("Throttled end, send all %d packets. Buffer at max: %s", bufSize, bufSize == KEEP_AT_MOST ? "YES" : "NO");
-    while (!isBufEmpty()) {
-        insertAfter(popNode(bufTail->prev), oldLast);
-        --bufSize;
-    }
-    throttleStartTick = 0;
-}
+static short throttleProcess(ModuleInst *inst, PacketList *list, int64_t now) {
+    ThrottleState *st = (ThrottleState *)inst->state;
+    PacketNode *pac, *next;
+    short acted = 0;
 
-static void dropBufPackets() {
-    LOG("Throttled end, drop all %d packets. Buffer at max: %s", bufSize, bufSize == KEEP_AT_MOST ? "YES" : "NO");
-    while (!isBufEmpty()) {
-        freeNode(popNode(bufTail->prev));
-        --bufSize;
-    }
-    throttleStartTick = 0;
-}
-
-
-static void throttleCloseDown(PacketNode *head, PacketNode *tail) {
-    UNREFERENCED_PARAMETER(tail);
-    UNREFERENCED_PARAMETER(head);
-    clearBufPackets(tail);
-    endTimePeriod();
-}
-
-static short throttleProcess(PacketNode *head, PacketNode *tail) {
-    short throttled = FALSE;
-    UNREFERENCED_PARAMETER(head);
-    if (!throttleStartTick) {
-        if (!isListEmpty() && calcChance(chance)) {
-            LOG("Start new throttling w/ chance %.1f, time frame: %d", chance/10.0, throttleFrame);
-            throttleStartTick = timeGetTime();
-            throttled = TRUE;
-            goto THROTTLE_START; // need this goto since maybe we'll start and stop at this single call
-        }
-    } else {
-THROTTLE_START:
-        // start a block for declaring local variables
-        {
-            // already throttling, keep filling up
-            PacketNode *pac = tail->prev;
-            DWORD currentTick = timeGetTime();
-            while (bufSize < KEEP_AT_MOST && pac != head) {
-                if (checkDirection(pac->addr.Outbound, throttleInbound, throttleOutbound)) {
-                    insertAfter(popNode(pac), bufHead);
-                    ++bufSize;
-                    pac = tail->prev;
-                } else {
-                    pac = pac->prev;
-                }
-            }
-
-            // send all when throttled enough, including in current step
-            if (bufSize >= KEEP_AT_MOST || (currentTick - throttleStartTick > (unsigned int)throttleFrame)) {
-                // drop throttled if dropThrottled is toggled
-                if (dropThrottled) {
-                    dropBufPackets();
-                } else {
-                    clearBufPackets(tail);
-                }
-            }
+    if (st->startTime == 0) {
+        if (!listEmpty(list) && rngChance(st->chance)) {
+            LOG("start throttling, chance %.1f%%, frame %d ms", st->chance / 100.0, st->frame);
+            st->startTime = now;
         }
     }
 
-    return throttled;
+    if (st->startTime != 0) {
+        for (pac = listFirst(list); pac != NULL; pac = next) {
+            next = listNext(list, pac);
+            if (listCount(&st->buf) >= THROTTLE_KEEP_AT_MOST) break;
+            if (!scopeMatch(&st->scope, pac)) continue;
+            listUnlink(list, pac);
+            pac->flags |= PN_FLAG_THROTTLED;
+            listPushBack(&st->buf, pac);
+            atomicAdd64(&inst->stats.packets, 1);
+            atomicAdd64(&inst->stats.bytes, pac->packetLen);
+        }
+        if (listCount(&st->buf) >= THROTTLE_KEEP_AT_MOST || now - st->startTime > MS_TO_US(st->frame)) {
+            if (st->dropThrottled) {
+                LOG("throttle ended, dropping %d packets", listCount(&st->buf));
+                atomicAdd64(&inst->stats.dropped, listCount(&st->buf));
+                listFreeAll(&st->buf);
+            } else {
+                LOG("throttle ended, releasing %d packets", listCount(&st->buf));
+                listAppendAll(list, &st->buf);
+            }
+            st->startTime = 0;
+        }
+        acted = 1;
+    }
+
+    atomicExch32(&inst->stats.queued, listCount(&st->buf));
+    return acted;
 }
 
-Module throttleModule = {
-    "Throttle",
-    NAME,
-    (short*)&throttleEnabled,
-    throttleSetupUI,
-    throttleStartUp,
-    throttleCloseDown,
-    throttleProcess,
-    // runtime fields
-    0, 0, NULL
+static int64_t throttleNextDeadline(ModuleInst *inst, int64_t now) {
+    ThrottleState *st = (ThrottleState *)inst->state;
+    UNREFERENCED_PARAMETER(now);
+    return st->startTime ? st->startTime + MS_TO_US(st->frame) : -1;
+}
+
+const ModuleDesc throttleModuleDesc = {
+    "Throttle", NAME, sizeof(ThrottleState),
+    throttleParams, (int)(sizeof(throttleParams) / sizeof(throttleParams[0])),
+    NULL, throttleInit, NULL,
+    throttleStartUp, throttleCloseDown, throttleProcess, throttleNextDeadline,
+    NULL, NULL
 };

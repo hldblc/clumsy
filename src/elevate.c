@@ -4,6 +4,7 @@
 // http://code.msdn.microsoft.com/windowsdesktop/CppUACSelfElevation-981c0160
 #include <Windows.h>
 #include <VersionHelpers.h>
+#include <shellapi.h>
 #include "common.h"
 
 // 
@@ -115,38 +116,49 @@ BOOL tryElevate(HWND hWnd, BOOL silent) {
         return FALSE;
     }
 
-    // when not silent then trying to reinvoke to elevate
-    if (!silent) {
+    // Not elevated: re-launch ourselves elevated, forwarding the original
+    // arguments so flags like --api / --headless / --start survive the UAC
+    // prompt. This happens whether or not we are in silent (parameterized)
+    // mode; `silent` only suppresses the message boxes, not the elevation.
+    {
         wchar_t szPath[MAX_PATH];
         if (GetModuleFileName(NULL, (LPSTR)szPath, ARRAYSIZE(szPath)))
         {
-            // Launch itself as administrator.
+            static char paramBuf[2048];
+            const char *p = GetCommandLineA();
             SHELLEXECUTEINFO sei = { sizeof(sei) };
+            if (*p == '"') {                       // skip a quoted exe path
+                ++p;
+                while (*p && *p != '"') ++p;
+                if (*p == '"') ++p;
+            } else {                               // skip an unquoted exe path
+                while (*p && *p != ' ' && *p != '\t') ++p;
+            }
+            while (*p == ' ' || *p == '\t') ++p;   // then any leading space
+            snprintf(paramBuf, sizeof(paramBuf), "%s", p);
+
             sei.lpVerb = (LPSTR)"runas";
             sei.lpFile = (LPSTR)szPath;
+            sei.lpParameters = paramBuf[0] ? (LPSTR)paramBuf : NULL;
             sei.hwnd = hWnd;
             sei.nShow = SW_NORMAL;
 
-            // here it is restartintg the program using run as
-            LOG("Try elevating by runas");
+            LOG("Try elevating by runas, args: %s", paramBuf);
             if (!ShellExecuteEx(&sei))
             {
                 DWORD dwError = GetLastError();
-                if (dwError == ERROR_CANCELLED)
+                if (dwError == ERROR_CANCELLED && !silent)
                 {
-                    // The user refused the elevation.
-                    // alert and exit
-                    MessageBox(hWnd, (LPCSTR)"clumsy needs to be elevated to work. Run as Administrator or click Yes in promoted UAC dialog",
+                    MessageBox(hWnd, (LPCSTR)"clumsy needs to be elevated to work. Run as Administrator or click Yes in the UAC dialog",
                         (LPCSTR)"Aborting", MB_OK);
                 }
             }
-            // runas executed.
-        } else {
+        } else if (!silent) {
             MessageBox(hWnd, (LPCSTR)"Failed to get clumsy path. Please place the executable in a normal directory.",
                 (LPCSTR)"Aborting", MB_OK);
         }
     }
 
-    // exit when not run as admin
+    // exit; the elevated copy (if the user accepted) carries on
     return TRUE;
 }
