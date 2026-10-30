@@ -9,6 +9,8 @@
 #include "engine.h"
 #include "rules.h"
 #include "uibind.h"
+#include "config.h"
+#include "profiles.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -27,6 +29,8 @@ BOOL parameterized = 0;
 
 static Ihandle *dialog, *startButton, *stateIcon, *statusLabel, *tabs, *presetList;
 static Ihandle *addRuleButton, *removeRuleButton, *advancedToggle, *timer, *timeoutTimer;
+static Ihandle *profileList, *saveButton, *loadButton;
+static void uiAddRuleTab(Rule *r);
 static int dialogMapped = 0;
 static int ruleSerial = 1;
 static LONG64 lastSent = 0, lastFailed = 0;
@@ -304,6 +308,85 @@ static int uiAdvancedCb(Ihandle *ih, int state) {
     return IUP_DEFAULT;
 }
 
+// ---- profiles / sessions ----
+static int uiProfileCb(Ihandle *ih, char *text, int item, int state) {
+    UNREFERENCED_PARAMETER(ih);
+    UNREFERENCED_PARAMETER(text);
+    if (state == 1) {
+        Rule *r = currentRule();
+        const char *frag = profileText(item - 1);
+        if (r && frag) {
+            configApplyFragment(r, frag);
+            engineWake();
+            showStatus("Applied profile to the current rule.");
+        }
+    }
+    return IUP_DEFAULT;
+}
+
+static int uiSaveCb(Ihandle *ih) {
+    Ihandle *dlg = IupFileDlg();
+    char err[MSG_BUFSIZE];
+    int i;
+    UNREFERENCED_PARAMETER(ih);
+    // pull the latest filter/process text from the widgets into the rules
+    for (i = 0; i < ruleSet.count; ++i) {
+        Rule *r = ruleSet.rules[i];
+        const char *f = IupGetAttribute(r->filterText, "VALUE");
+        const char *p = r->processText ? IupGetAttribute(r->processText, "VALUE") : NULL;
+        snprintf(r->filter, sizeof(r->filter), "%s", f ? f : "");
+        snprintf(r->process, sizeof(r->process), "%s", p ? p : "");
+    }
+    IupSetAttribute(dlg, "DIALOGTYPE", "SAVE");
+    IupSetAttribute(dlg, "TITLE", "Save clumsy configuration");
+    IupSetAttribute(dlg, "EXTFILTER", "clumsy config (*.clumsy)|*.clumsy|All files|*.*|");
+    IupSetAttribute(dlg, "FILE", "clumsy.clumsy");
+    IupPopup(dlg, IUP_CURRENT, IUP_CURRENT);
+    if (IupGetInt(dlg, "STATUS") != -1) {
+        const char *path = IupGetAttribute(dlg, "VALUE");
+        if (configSave(path, err, sizeof(err))) showStatus("Saved configuration.");
+        else showStatus(err);
+    }
+    IupDestroy(dlg);
+    return IUP_DEFAULT;
+}
+
+static int uiLoadCb(Ihandle *ih) {
+    Ihandle *dlg;
+    char err[MSG_BUFSIZE];
+    UNREFERENCED_PARAMETER(ih);
+    if (engineIsRunning()) {
+        showStatus("Stop filtering before loading a configuration.");
+        return IUP_DEFAULT;
+    }
+    dlg = IupFileDlg();
+    IupSetAttribute(dlg, "DIALOGTYPE", "OPEN");
+    IupSetAttribute(dlg, "TITLE", "Load clumsy configuration");
+    IupSetAttribute(dlg, "EXTFILTER", "clumsy config (*.clumsy)|*.clumsy|All files|*.*|");
+    IupPopup(dlg, IUP_CURRENT, IUP_CURRENT);
+    if (IupGetInt(dlg, "STATUS") == 0) {
+        const char *path = IupGetAttribute(dlg, "VALUE");
+        if (configLoad(path, err, sizeof(err))) showStatus("Loaded configuration.");
+        else showStatus(err);
+    }
+    IupDestroy(dlg);
+    return IUP_DEFAULT;
+}
+
+// rebuild every rule tab from the current rule set (after a config load)
+static void rebuildTabs(void) {
+    Ihandle *child;
+    int i;
+    while ((child = IupGetChild(tabs, 0)) != NULL) {
+        IupDestroy(child);
+    }
+    for (i = 0; i < ruleSet.count; ++i) {
+        ruleSet.rules[i]->tab = NULL;
+        uiAddRuleTab(ruleSet.rules[i]);
+    }
+    IupRefresh(dialog);
+}
+
 // ---- start / stop ----
 static void setRunningUi(int running) {
     int i;
@@ -515,6 +598,7 @@ static void init(int argc, char *argv[]) {
     loadConfig();
     IupOpen(&argc, &argv);
     uiInstallHooks();
+    configRebuildUiHook = rebuildTabs;
 
     LOG("argc: %d", argc);
     if (argc > 1) {
@@ -571,7 +655,27 @@ static void init(int argc, char *argv[]) {
     advancedToggle = IupToggle("Advanced", NULL);
     IupSetCallback(advancedToggle, "ACTION", (Icallback)uiAdvancedCb);
 
-    controlHbox = IupHbox(stateIcon, startButton, IupFill(), presetLabel, presetList, addRuleButton, removeRuleButton, advancedToggle, NULL);
+    profileList = IupList(NULL);
+    IupSetAttribute(profileList, "DROPDOWN", "YES");
+    IupSetAttribute(profileList, "VISIBLECOLUMNS", "16");
+    for (ix = 0; ix < (UINT)profileCount(); ++ix) {
+        char key[8];
+        snprintf(key, sizeof(key), "%u", ix + 1);
+        IupStoreAttribute(profileList, key, profileName((int)ix));
+    }
+    IupSetAttribute(profileList, "TIP", "Apply a link profile to the current rule");
+    IupSetCallback(profileList, "ACTION", (Icallback)uiProfileCb);
+
+    saveButton = IupButton("Save", NULL);
+    IupSetAttribute(saveButton, "PADDING", "4x");
+    IupSetCallback(saveButton, "ACTION", uiSaveCb);
+    loadButton = IupButton("Load", NULL);
+    IupSetAttribute(loadButton, "PADDING", "4x");
+    IupSetCallback(loadButton, "ACTION", uiLoadCb);
+
+    controlHbox = IupHbox(stateIcon, startButton, IupFill(),
+                          IupLabel("Profile:"), profileList,
+                          saveButton, loadButton, addRuleButton, removeRuleButton, advancedToggle, NULL);
     IupSetAttribute(controlHbox, "ALIGNMENT", "ACENTER");
     IupSetAttribute(controlHbox, "GAP", "4");
     IupSetAttribute(controlHbox, "NCMARGIN", "4x4");

@@ -28,8 +28,8 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [~] 15. Hostname/CIDR targets (CIDR can be written directly in filters; hostname resolution pending)
 - [x] 13. Per-process filtering via the WinDivert flow layer (Process field per rule)
 - [ ] 17. Real command line: help, validation, profiles, scenarios, seed, headless
-- [ ] 6. Link profiles (3G, LTE, satellite, lossy Wi-Fi, DSL, intercontinental)
-- [ ] 19. Saved sessions and shareable JSON configs
+- [x] 6. Link profiles (3G, LTE, satellite, DSL bufferbloat, lossy Wi-Fi, flapping, ...) applied to the current rule
+- [x] 19. Saved sessions and shareable configs (Save/Load to .clumsy INI-style files)
 - [ ] 7. Scripted scenarios on a timeline
 - [ ] 18. Remote control API (local HTTP + JSON, token protected)
 - [ ] 20. Global hotkeys and tray mode

@@ -7,6 +7,8 @@
 #include "common.h"
 #include "rules.h"
 #include "procflow.h"
+#include "config.h"
+#include "profiles.h"
 
 extern int checks, failures;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -899,6 +901,70 @@ static void testRules(void) {
     }
 }
 
+// ---- config save/load + profiles ----
+static void testConfig(void) {
+    static char buf[CONFIG_TEXT_MAX];
+    char err[256];
+    Rule *a, *b, *lag;
+    ModuleInst *m;
+    char val[48];
+
+    ruleSetClear();
+    a = ruleCreate("Game", "udp and outbound");
+    snprintf(a->process, sizeof(a->process), "game.exe");
+    ruleSetAdd(a);
+    b = ruleCreate("Voice", "udp.DstPort == 50000");
+    ruleSetAdd(b);
+    m = ruleFindModule(a, "lag");
+    moduleSetEnabled(m, 1);
+    CHECK(moduleSetParamText(m, "time", "20/80"));
+    CHECK(moduleSetParamText(m, "dist", "normal"));
+    m = ruleFindModule(b, "drop");
+    moduleSetEnabled(m, 1);
+    CHECK(moduleSetParamText(m, "chance", "5"));
+
+    CHECK(configSerialize(buf, sizeof(buf)) > 0);
+    CHECK(strstr(buf, "name = Game") != NULL);
+    CHECK(strstr(buf, "process = game.exe") != NULL);
+    CHECK(strstr(buf, "lag.time = 20/80") != NULL);
+
+    // round trip: apply the serialized text and check the rebuilt rules
+    CHECK(configApply(buf, err, sizeof(err)));
+    CHECK_EQ(ruleSet.count, 2);
+    CHECK(strcmp(ruleSet.rules[0]->name, "Game") == 0);
+    CHECK(strcmp(ruleSet.rules[0]->filter, "udp and outbound") == 0);
+    CHECK(strcmp(ruleSet.rules[0]->process, "game.exe") == 0);
+    lag = ruleFindModule(ruleSet.rules[0], "lag");
+    CHECK(lag->enabled);
+    CHECK(moduleGetParamText(lag, "time", val, sizeof(val)));
+    CHECK(strcmp(val, "20/80") == 0);
+    CHECK(moduleGetParamText(lag, "dist", val, sizeof(val)));
+    CHECK(strcmp(val, "normal") == 0);
+    CHECK(ruleFindModule(ruleSet.rules[1], "drop")->enabled);
+
+    // a fragment applies to one rule in place
+    {
+        ModuleInst *bw;
+        configApplyFragment(ruleSet.rules[0], "bandwidth=on bandwidth.limit=256; drop=on drop.chance=2.5");
+        bw = ruleFindModule(ruleSet.rules[0], "bandwidth");
+        CHECK(bw->enabled);
+        CHECK(moduleGetParamText(bw, "limit", val, sizeof(val)));
+        CHECK(strcmp(val, "256") == 0);
+        CHECK(ruleFindModule(ruleSet.rules[0], "drop")->enabled);
+    }
+
+    // every built-in profile applies without error
+    CHECK(profileCount() > 5);
+    {
+        int i;
+        for (i = 0; i < profileCount(); ++i) {
+            CHECK(profileText(i) != NULL);
+            CHECK(configApplyFragment(ruleSet.rules[0], profileText(i)) > 0);
+        }
+    }
+    ruleSetClear();
+}
+
 void testModules(void) {
     rngSeed(777);
     testLagFixed();
@@ -915,4 +981,5 @@ void testModules(void) {
     testFlowScope();
     testProcflow();
     testRules();
+    testConfig();
 }
