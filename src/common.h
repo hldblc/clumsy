@@ -48,6 +48,6 @@ BOOL IsElevated(void);
 BOOL IsRunAsAdmin(void);
 BOOL tryElevate(HWND hWnd, BOOL silent);
 
-// legacy "--key value" arguments stored as IUP globals (utils.c)
+// legacy "--key value" arguments stored as IUP globals (main.c)
 extern BOOL parameterized;
 BOOL parseArgs(int argc, char *argv[]);

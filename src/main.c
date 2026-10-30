@@ -312,6 +312,28 @@ static int uiTimeoutCb(Ihandle *ih) {
 }
 
 // ---- legacy command line: --filter "..." --lag on --lag-time 100 ... ----
+// parse "--key value" pairs into IUP globals. Only checks the argument shape.
+BOOL parseArgs(int argc, char *argv[]) {
+    int ix = 0;
+    char *key, *value;
+    if (argc == 1) return 0;
+    for (;;) {
+        if (++ix >= argc) break;
+        key = argv[ix];
+        if (key[0] != '-' || key[1] != '-' || key[2] == '\0') {
+            return 0;
+        }
+        key = &(key[2]);
+        if (++ix >= argc) {
+            return 0;
+        }
+        value = argv[ix];
+        IupStoreGlobal(key, value);
+        LOG("option: %s : %s", key, value);
+    }
+    return 1;
+}
+
 static int parseOnOff(const char *v, int *out) {
     if (strieq(v, "on") || strieq(v, "1") || strieq(v, "yes") || strieq(v, "true")) { *out = 1; return 1; }
     if (strieq(v, "off") || strieq(v, "0") || strieq(v, "no") || strieq(v, "false")) { *out = 0; return 1; }

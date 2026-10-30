@@ -34,7 +34,8 @@ ModuleInst *moduleCreate(const ModuleDesc *desc, Rule *rule, int index) {
     inst->index = index;
     inst->state = calloc(1, desc->stateSize > 0 ? desc->stateSize : 1);
     inst->widgets = (Ihandle **)calloc(desc->paramCount > 0 ? (size_t)desc->paramCount : 1, sizeof(Ihandle *));
-    if (inst->state == NULL || inst->widgets == NULL) {
+    inst->widgetsDir = (Ihandle **)calloc(desc->paramCount > 0 ? (size_t)desc->paramCount * 2 : 2, sizeof(Ihandle *));
+    if (inst->state == NULL || inst->widgets == NULL || inst->widgetsDir == NULL) {
         moduleDestroy(inst);
         return NULL;
     }
@@ -48,6 +49,7 @@ void moduleDestroy(ModuleInst *inst) {
     if (inst->desc->destroy && inst->state) inst->desc->destroy(inst);
     free(inst->state);
     free(inst->widgets);
+    free(inst->widgetsDir);
     free(inst);
 }
 
@@ -231,21 +233,54 @@ void paramFormat(const ParamDesc *p, int value, char *buf, size_t bufSize) {
     }
 }
 
-int moduleSetParamText(ModuleInst *inst, const char *name, const char *text) {
-    int dir = -1, value;
-    const ParamDesc *p = moduleFindParam(inst->desc, name, &dir);
-    if (p == NULL) return 0;
-    if (!paramParse(p, text, &value)) return 0;
-    paramSetInt(inst, p, dir, value);
+int paramApplyText(ModuleInst *inst, const ParamDesc *p, int dir, const char *text) {
+    int a, b;
+    const char *slash = strchr(text, '/');
+    if (slash != NULL && (p->flags & PF_PERDIR) && dir < 0) {
+        char left[32];
+        size_t n = (size_t)(slash - text);
+        if (n >= sizeof(left)) return 0;
+        memcpy(left, text, n);
+        left[n] = 0;
+        if (!paramParse(p, left, &a) || !paramParse(p, slash + 1, &b)) return 0;
+        paramSetInt(inst, p, 0, a);
+        paramSetInt(inst, p, 1, b);
+    } else {
+        if (!paramParse(p, text, &a)) return 0;
+        paramSetInt(inst, p, dir, a);
+    }
     if (paramUiRefreshHook) paramUiRefreshHook(inst, p);
     return 1;
+}
+
+void paramFormatBoth(const ModuleInst *inst, const ParamDesc *p, char *buf, size_t bufSize) {
+    int in = paramGetInt(inst, p, 0);
+    if ((p->flags & PF_PERDIR) && paramGetInt(inst, p, 1) != in) {
+        char a[32], b[32];
+        paramFormat(p, in, a, sizeof(a));
+        paramFormat(p, paramGetInt(inst, p, 1), b, sizeof(b));
+        snprintf(buf, bufSize, "%s/%s", a, b);
+    } else {
+        paramFormat(p, in, buf, bufSize);
+    }
+}
+
+int moduleSetParamText(ModuleInst *inst, const char *name, const char *text) {
+    int dir = -1;
+    const ParamDesc *p = moduleFindParam(inst->desc, name, &dir);
+    if (p == NULL) return 0;
+    return paramApplyText(inst, p, dir, text);
 }
 
 int moduleGetParamText(const ModuleInst *inst, const char *name, char *buf, size_t bufSize) {
     int dir = -1;
     const ParamDesc *p = moduleFindParam(inst->desc, name, &dir);
     if (p == NULL) return 0;
-    paramFormat(p, paramGetInt(inst, p, dir), buf, bufSize);
+    if (dir < 0) {
+        paramFormatBoth(inst, p, buf, bufSize);
+    } else {
+        paramFormat(p, paramGetInt(inst, p, dir), buf, bufSize);
+    }
     return 1;
 }
 

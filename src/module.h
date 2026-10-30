@@ -74,6 +74,8 @@ typedef struct {
     void (*closeDown)(ModuleInst *inst, PacketList *list);     // return held packets to list
     short (*process)(ModuleInst *inst, PacketList *list, int64_t now); // nonzero if it acted
     int64_t (*nextDeadline)(ModuleInst *inst, int64_t now);    // next time process() needs to run, -1 none; may be NULL
+    const char *actionLabel;                                   // optional push button shown with the controls
+    void (*action)(ModuleInst *inst);                          // its handler, runs on the UI thread
 } ModuleDesc;
 
 struct ModuleInst {
@@ -88,6 +90,7 @@ struct ModuleInst {
     // UI (owned by the UI layer)
     Ihandle *icon, *toggle, *controls, *advanced;
     Ihandle **widgets;        // one per param, NULL when not shown
+    Ihandle **widgetsDir;     // two per param (inbound, outbound) for per-direction fields
 };
 
 // All known module descriptors in processing order.
@@ -108,6 +111,8 @@ int  paramParse(const ParamDesc *p, const char *text, int *out);        // 1 ok,
 void paramFormat(const ParamDesc *p, int value, char *buf, size_t bufSize);
 int  paramEnumCount(const ParamDesc *p);
 int  paramEnumName(const ParamDesc *p, int index, char *buf, size_t bufSize);
+int  paramApplyText(ModuleInst *inst, const ParamDesc *p, int dir, const char *text); // "in/out" allowed when dir < 0
+void paramFormatBoth(const ModuleInst *inst, const ParamDesc *p, char *buf, size_t bufSize); // "v" or "in/out"
 int  moduleSetParamText(ModuleInst *inst, const char *name, const char *text); // 1 ok, 0 error
 int  moduleGetParamText(const ModuleInst *inst, const char *name, char *buf, size_t bufSize);
 void moduleSetEnabled(ModuleInst *inst, int on);

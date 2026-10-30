@@ -93,5 +93,6 @@ const ModuleDesc throttleModuleDesc = {
     "Throttle", NAME, sizeof(ThrottleState),
     throttleParams, (int)(sizeof(throttleParams) / sizeof(throttleParams[0])),
     NULL, throttleInit, NULL,
-    throttleStartUp, throttleCloseDown, throttleProcess, throttleNextDeadline
+    throttleStartUp, throttleCloseDown, throttleProcess, throttleNextDeadline,
+    NULL, NULL
 };

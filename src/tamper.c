@@ -6,14 +6,14 @@
 typedef struct {
     ScopeState scope;
     volatile short checksum;  // recompute checksums after tampering
-    volatile short chance;    // [0, 10000]
+    volatile short chance[2]; // [0, 10000], per direction
     int patIx;
 } TamperState;
 
 static const ParamDesc tamperParams[] = {
     { "checksum", "Redo Checksum", PT_BOOL, offsetof(TamperState, checksum), 0, 1, 1, NULL, 0 },
     SCOPE_PARAMS(TamperState),
-    { "chance", "Chance(%)", PT_CHANCE, offsetof(TamperState, chance), 0, 10000, 1000, NULL, 0 },
+    { "chance", "Chance(%)", PT_CHANCE, offsetof(TamperState, chance), 0, 10000, 1000, NULL, PF_PERDIR },
 };
 
 // patterns cover every bit
@@ -52,7 +52,7 @@ static short tamperProcess(ModuleInst *inst, PacketList *list, int64_t now) {
     for (pac = listFirst(list); pac != NULL; pac = listNext(list, pac)) {
         unsigned char *data = NULL;
         UINT dataLen = 0;
-        if (!scopeMatch(&st->scope, pac) || !rngChance(st->chance)) continue;
+        if (!scopeMatch(&st->scope, pac) || !rngChance(PERDIR(st->chance, pac))) continue;
         if (!WinDivertHelperParsePacket(pac->packet, pac->packetLen, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                 (PVOID *)&data, &dataLen, NULL, NULL) || data == NULL || dataLen == 0) {
             continue;
@@ -84,5 +84,6 @@ const ModuleDesc tamperModuleDesc = {
     "Tamper", NAME, sizeof(TamperState),
     tamperParams, (int)(sizeof(tamperParams) / sizeof(tamperParams[0])),
     NULL, NULL, NULL,
-    tamperStartUp, tamperCloseDown, tamperProcess, NULL
+    tamperStartUp, tamperCloseDown, tamperProcess, NULL,
+    NULL, NULL
 };

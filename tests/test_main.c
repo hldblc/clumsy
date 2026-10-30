@@ -7,13 +7,11 @@
 #include "rng.h"
 #include "clock.h"
 
-static int checks = 0, failures = 0;
+int checks = 0, failures = 0;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
 #define CHECK_EQ(a, b) do { long long _a = (long long)(a), _b = (long long)(b); ++checks; if (_a != _b) { ++failures; printf("FAIL %s:%d: %s == %s (%lld vs %lld)\n", __FILE__, __LINE__, #a, #b, _a, _b); } } while (0)
 
-// The test binary needs a module table because params.c references it.
-const ModuleDesc *const moduleDescs[] = { NULL };
-const int moduleDescCount = 0;
+void testModules(void);   // tests/test_modules.c
 
 static PacketNode *mk(int tag) {
     char buf[64];
@@ -329,6 +327,7 @@ int main(void) {
     testParams();
     testRng();
     testClock();
+    testModules();
     packetPoolShutdown();
     printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

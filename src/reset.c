@@ -1,37 +1,23 @@
 // Set TCP RST: flag TCP packets with RST, by chance or on demand.
-#include "iup.h"
 #include "common.h"
-#include "uibind.h"
 
 #define NAME "reset"
 
 typedef struct {
     ScopeState scope;
-    volatile short chance;        // [0, 10000]
+    volatile short chance[2];     // [0, 10000], per direction
     volatile short setNextCount;  // RST the next N matching packets (button)
 } ResetState;
 
 static const ParamDesc resetParams[] = {
     SCOPE_PARAMS(ResetState),
-    { "chance", "Chance(%)", PT_CHANCE, offsetof(ResetState, chance), 0, 10000, 0, NULL, 0 },
+    { "chance", "Chance(%)", PT_CHANCE, offsetof(ResetState, chance), 0, 10000, 0, NULL, PF_PERDIR },
 };
 
-static int resetNextButtonCb(Ihandle *ih) {
-    ModuleInst *inst = (ModuleInst *)IupGetAttribute(ih, UI_ATTR_INST);
+static void resetAction(ModuleInst *inst) {
     ResetState *st = (ResetState *)inst->state;
-    if (!inst->enabled) return IUP_DEFAULT;
+    if (!inst->enabled) return;
     atomicInc16(&st->setNextCount);
-    return IUP_DEFAULT;
-}
-
-static Ihandle *resetSetupUI(ModuleInst *inst) {
-    Ihandle *row = uiBuildParamRow(inst, 0);
-    Ihandle *button = IupButton("RST next packet", NULL);
-    IupSetAttribute(button, UI_ATTR_INST, (char *)inst);
-    IupSetAttribute(button, "PADDING", "4x");
-    IupSetCallback(button, "ACTION", resetNextButtonCb);
-    IupInsert(row, IupGetChild(row, 0), button);
-    return row;
 }
 
 static void resetStartUp(ModuleInst *inst, int64_t now) {
@@ -56,10 +42,10 @@ static short resetProcess(ModuleInst *inst, PacketList *list, int64_t now) {
     for (pac = listFirst(list); pac != NULL; pac = listNext(list, pac)) {
         PWINDIVERT_TCPHDR tcp = NULL;
         if (!scopeMatch(&st->scope, pac)) continue;
-        if (!(st->setNextCount > 0 || rngChance(st->chance))) continue;
+        if (!(st->setNextCount > 0 || rngChance(PERDIR(st->chance, pac)))) continue;
         WinDivertHelperParsePacket(pac->packet, pac->packetLen, NULL, NULL, NULL, NULL, NULL, &tcp, NULL, NULL, NULL, NULL, NULL);
         if (tcp == NULL) continue;
-        LOG("injecting RST with chance %.1f%%", st->chance / 100.0);
+        LOG("injecting RST");
         tcp->Rst = 1;
         WinDivertHelperCalcChecksums(pac->packet, pac->packetLen, &pac->addr, 0);
         pac->flags |= PN_FLAG_RST;
@@ -76,6 +62,7 @@ static short resetProcess(ModuleInst *inst, PacketList *list, int64_t now) {
 const ModuleDesc resetModuleDesc = {
     "Set TCP RST", NAME, sizeof(ResetState),
     resetParams, (int)(sizeof(resetParams) / sizeof(resetParams[0])),
-    resetSetupUI, NULL, NULL,
-    resetStartUp, resetCloseDown, resetProcess, NULL
+    NULL, NULL, NULL,
+    resetStartUp, resetCloseDown, resetProcess, NULL,
+    "RST next packet", resetAction
 };

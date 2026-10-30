@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <Windows.h>
-#include "iup.h"
 #include "common.h"
 
 // ---- logging ----
@@ -110,25 +109,3 @@ const unsigned char icon8x8[8 * 8] = {
     0, 1, 1, 1, 1, 1, 1, 0,
     0, 0, 1, 1, 1, 1, 0, 0,
 };
-
-// parse "--key value" pairs into IUP globals. Only checks the argument shape.
-BOOL parseArgs(int argc, char *argv[]) {
-    int ix = 0;
-    char *key, *value;
-    if (argc == 1) return 0;
-    for (;;) {
-        if (++ix >= argc) break;
-        key = argv[ix];
-        if (key[0] != '-' || key[1] != '-' || key[2] == '\0') {
-            return 0;
-        }
-        key = &(key[2]);
-        if (++ix >= argc) {
-            return 0;
-        }
-        value = argv[ix];
-        IupStoreGlobal(key, value);
-        LOG("option: %s : %s", key, value);
-    }
-    return 1;
-}

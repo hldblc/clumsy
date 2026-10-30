@@ -1,202 +1,223 @@
-// Bandwidth cap: drop whatever exceeds a byte rate measured over a sliding window.
+// Bandwidth: rate limiter per direction, as a shaper (queue) or a policer (drop).
+//
+// The link is modelled with a virtual clock: linkFree is the time at which the
+// link finishes everything scheduled so far. A packet of S bytes occupies the
+// link for S/rate. While the queue is empty the clock may lag behind "now" by at
+// most the burst allowance, which is the token bucket depth. While packets are
+// queued the clock is exact, so late wakeups never lose or invent credit.
+//
+// Shape mode queues packets and releases them when the link is free, so TCP
+// sees added delay instead of loss until the queue overflows; a long queue
+// reproduces bufferbloat. Police mode drops whatever is not conforming.
 #include <stdlib.h>
-#include <stdint.h>
 #include "common.h"
 
 #define NAME "bandwidth"
+#define BW_MIN_BURST_BYTES 2048.0   // always allow one full sized packet
+#define BW_MIN_QUEUE_BYTES 4096.0
+#define BW_NEVER (INT64_MAX / 4)
 
-//---------------------------------------------------------------------
-// sliding window rate stats
-//---------------------------------------------------------------------
-typedef struct {
-    int32_t initialized;
-    uint32_t oldest_index;
-    uint32_t oldest_ts;
-    int64_t accumulated_count;
-    int32_t sample_num;
-    int window_size;
-    float scale;
-    uint32_t *array_sum;
-    uint32_t *array_sample;
-} CRateStats;
+enum { BW_MODE_SHAPE = 0, BW_MODE_POLICE };
+enum { BW_AQM_TAIL = 0, BW_AQM_HEAD, BW_AQM_RED };
 
-static CRateStats *crate_stats_new(int window_size, float scale);
-static void crate_stats_delete(CRateStats *rate);
-static void crate_stats_reset(CRateStats *rate);
-static void crate_stats_update(CRateStats *rate, int32_t count, uint32_t now_ts);
-static int32_t crate_stats_calculate(CRateStats *rate, uint32_t now_ts);
-
-//---------------------------------------------------------------------
-// module
-//---------------------------------------------------------------------
 typedef struct {
     ScopeState scope;
-    volatile LONG limit;      // KB/s
-    CRateStats *rateStats;
-} BandwidthState;
+    volatile LONG limit[2];      // KB/s per direction
+    volatile short mode;         // BW_MODE_*
+    volatile short queueMs;      // max queue depth expressed as ms at the rate
+    volatile short aqm;          // what to do with a full queue
+    volatile short burstMs;      // allowed burst as ms at the rate
+    PacketList q[2];
+    double qBytes[2];
+    int64_t linkFree[2];         // virtual time the link becomes free
+} BwState;
 
-static const ParamDesc bandwidthParams[] = {
-    SCOPE_PARAMS(BandwidthState),
-    { "limit", "Limit(KB/s)", PT_INT32, offsetof(BandwidthState, limit), 0, 99999, 10, NULL, 0 },
+static const ParamDesc bwParams[] = {
+    SCOPE_PARAMS(BwState),
+    { "limit", "Limit(KB/s)", PT_INT32, offsetof(BwState, limit),   0, 999999, 100, NULL, PF_PERDIR },
+    { "mode",  "Mode",        PT_ENUM,  offsetof(BwState, mode),    0, 1, BW_MODE_SHAPE, "shape|police", 0 },
+    { "queue", "Queue(ms)",   PT_INT,   offsetof(BwState, queueMs), 1, 5000, 200, NULL, PF_ADVANCED },
+    { "full",  "When full",   PT_ENUM,  offsetof(BwState, aqm),     0, 2, BW_AQM_TAIL, "tail-drop|head-drop|random-early", PF_ADVANCED },
+    { "burst", "Burst(ms)",   PT_INT,   offsetof(BwState, burstMs), 1, 1000, 10, NULL, PF_ADVANCED },
 };
 
-static void bandwidthStartUp(ModuleInst *inst, int64_t now) {
-    BandwidthState *st = (BandwidthState *)inst->state;
-    UNREFERENCED_PARAMETER(now);
-    if (st->rateStats) crate_stats_delete(st->rateStats);
-    st->rateStats = crate_stats_new(1000, 1000);
+static double rateBytesPerUs(const BwState *st, int dir) {
+    return (double)st->limit[dir] * 1024.0 / 1000000.0;
+}
+
+// time the link needs for S bytes
+static int64_t txTimeUs(const BwState *st, int dir, UINT size) {
+    double rate = rateBytesPerUs(st, dir);
+    if (rate <= 0.0) return BW_NEVER;
+    return (int64_t)((double)size / rate + 0.5);
+}
+
+// how far the clock may lag behind now while idle: the burst allowance
+static int64_t burstUs(const BwState *st, int dir) {
+    double rate = rateBytesPerUs(st, dir);
+    int64_t b = (int64_t)st->burstMs * 1000;
+    if (rate > 0.0) {
+        int64_t minBurst = (int64_t)(BW_MIN_BURST_BYTES / rate);
+        if (minBurst > b) b = minBurst;
+    }
+    return b;
+}
+
+static double queueLimit(const BwState *st, int dir) {
+    double q = rateBytesPerUs(st, dir) * (double)st->queueMs * 1000.0;
+    return q < BW_MIN_QUEUE_BYTES ? BW_MIN_QUEUE_BYTES : q;
+}
+
+// an idle link banks at most the burst allowance
+static void capIdleCredit(BwState *st, int dir, int64_t now) {
+    if (listEmpty(&st->q[dir])) {
+        int64_t floor = now - burstUs(st, dir);
+        if (st->linkFree[dir] < floor) st->linkFree[dir] = floor;
+    }
+}
+
+static void bwInit(ModuleInst *inst) {
+    BwState *st = (BwState *)inst->state;
+    listInit(&st->q[0]);
+    listInit(&st->q[1]);
+}
+
+static void bwStartUp(ModuleInst *inst, int64_t now) {
+    BwState *st = (BwState *)inst->state;
+    int d;
+    for (d = 0; d < 2; ++d) {
+        listEnsureInit(&st->q[d]);
+        assert(listEmpty(&st->q[d]));
+        st->qBytes[d] = 0;
+        st->linkFree[d] = now - burstUs(st, d);   // start with a full bucket
+    }
     LOG("bandwidth enabled");
 }
 
-static void bandwidthCloseDown(ModuleInst *inst, PacketList *list) {
-    BandwidthState *st = (BandwidthState *)inst->state;
-    UNREFERENCED_PARAMETER(list);
-    if (st->rateStats) crate_stats_delete(st->rateStats);
-    st->rateStats = NULL;
+static void bwCloseDown(ModuleInst *inst, PacketList *list) {
+    BwState *st = (BwState *)inst->state;
+    int d;
+    for (d = 0; d < 2; ++d) {
+        listAppendAll(list, &st->q[d]);
+        st->qBytes[d] = 0;
+    }
+    atomicExch32(&inst->stats.queued, 0);
     LOG("bandwidth disabled");
 }
 
-static void bandwidthDestroy(ModuleInst *inst) {
-    BandwidthState *st = (BandwidthState *)inst->state;
-    if (st->rateStats) crate_stats_delete(st->rateStats);
-    st->rateStats = NULL;
+static void dropPacket(ModuleInst *inst, PacketList *from, PacketNode *pac) {
+    atomicAdd64(&inst->stats.dropped, 1);
+    packetFree(listUnlink(from, pac));
 }
 
-static short bandwidthProcess(ModuleInst *inst, PacketList *list, int64_t now) {
-    BandwidthState *st = (BandwidthState *)inst->state;
+static short bwProcess(ModuleInst *inst, PacketList *list, int64_t now) {
+    BwState *st = (BwState *)inst->state;
     PacketNode *pac, *next;
-    uint32_t now_ts = (uint32_t)US_TO_MS(now);
-    int limit = st->limit * 1024;
-    short dropped = 0;
+    short acted = 0;
+    int d;
 
-    // 0 is allowed and drops everything in scope
-    if (limit < 0 || st->rateStats == NULL) {
-        return 0;
-    }
+    capIdleCredit(st, 0, now);
+    capIdleCredit(st, 1, now);
+
     for (pac = listFirst(list); pac != NULL; pac = next) {
-        int rate, size;
+        int64_t tx;
         next = listNext(list, pac);
         if (!scopeMatch(&st->scope, pac)) continue;
-        rate = crate_stats_calculate(st->rateStats, now_ts);
-        size = (int)pac->packetLen;
-        if (rate + size > limit) {
-            LOG("dropped over bandwidth %d KB/s, %s", (int)st->limit, pac->addr.Outbound ? "outbound" : "inbound");
-            atomicAdd64(&inst->stats.packets, 1);
-            atomicAdd64(&inst->stats.bytes, pac->packetLen);
-            atomicAdd64(&inst->stats.dropped, 1);
-            packetFree(listUnlink(list, pac));
-            dropped = 1;
-        } else {
-            crate_stats_update(st->rateStats, size, now_ts);
+        d = pac->addr.Outbound ? 1 : 0;
+        tx = txTimeUs(st, d, pac->packetLen);
+        atomicAdd64(&inst->stats.packets, 1);
+        atomicAdd64(&inst->stats.bytes, pac->packetLen);
+
+        if (st->mode == BW_MODE_POLICE) {
+            if (tx != BW_NEVER && st->linkFree[d] + tx <= now) {
+                st->linkFree[d] += tx;          // conforming
+            } else {
+                dropPacket(inst, list, pac);
+                acted = 1;
+            }
+            continue;
+        }
+
+        // shape: pass straight through if nothing waits and the link is free
+        if (listEmpty(&st->q[d]) && tx != BW_NEVER && st->linkFree[d] + tx <= now) {
+            st->linkFree[d] += tx;
+            continue;
+        }
+        {
+            double size = (double)pac->packetLen;
+            double limit = queueLimit(st, d);
+            int drop = 0;
+            if (st->qBytes[d] + size > limit) {
+                if (st->aqm == BW_AQM_HEAD) {
+                    while (!listEmpty(&st->q[d]) && st->qBytes[d] + size > limit) {
+                        PacketNode *old = listFirst(&st->q[d]);
+                        st->qBytes[d] -= (double)old->packetLen;
+                        dropPacket(inst, &st->q[d], old);
+                    }
+                    drop = st->qBytes[d] + size > limit;
+                } else {
+                    drop = 1;
+                }
+            } else if (st->aqm == BW_AQM_RED) {
+                // random early drop: probability rises from 0 at half full to 1 at full
+                double fill = st->qBytes[d] / limit;
+                if (fill > 0.5 && rngUniform() < (fill - 0.5) * 2.0) drop = 1;
+            }
+            if (drop) {
+                dropPacket(inst, list, pac);
+                acted = 1;
+                continue;
+            }
+            listUnlink(list, pac);
+            pac->flags |= PN_FLAG_SHAPED;
+            listPushBack(&st->q[d], pac);
+            st->qBytes[d] += size;
+            acted = 1;
         }
     }
-    return dropped;
+
+    // release what the link has had time for, oldest first, per direction
+    for (d = 0; d < 2; ++d) {
+        while ((pac = listFirst(&st->q[d])) != NULL) {
+            int64_t tx = txTimeUs(st, d, pac->packetLen);
+            if (tx == BW_NEVER || st->linkFree[d] + tx > now) break;
+            st->linkFree[d] += tx;
+            st->qBytes[d] -= (double)pac->packetLen;
+            listUnlink(&st->q[d], pac);
+            listPushBack(list, pac);
+            acted = 1;
+        }
+        if (listEmpty(&st->q[d])) {
+            st->qBytes[d] = 0;
+            capIdleCredit(st, d, now);   // the link went idle: stop banking credit
+        }
+    }
+
+    atomicExch32(&inst->stats.queued, listCount(&st->q[0]) + listCount(&st->q[1]));
+    return acted;
+}
+
+static int64_t bwNextDeadline(ModuleInst *inst, int64_t now) {
+    BwState *st = (BwState *)inst->state;
+    int64_t best = -1;
+    int d;
+    UNREFERENCED_PARAMETER(now);
+    for (d = 0; d < 2; ++d) {
+        PacketNode *head = listFirst(&st->q[d]);
+        int64_t tx, t;
+        if (head == NULL) continue;
+        tx = txTimeUs(st, d, head->packetLen);
+        if (tx == BW_NEVER) continue;          // rate 0: the queue only drains by dropping
+        t = st->linkFree[d] + tx;
+        if (best < 0 || t < best) best = t;
+    }
+    return best;
 }
 
 const ModuleDesc bandwidthModuleDesc = {
-    "Bandwidth", NAME, sizeof(BandwidthState),
-    bandwidthParams, (int)(sizeof(bandwidthParams) / sizeof(bandwidthParams[0])),
-    NULL, NULL, bandwidthDestroy,
-    bandwidthStartUp, bandwidthCloseDown, bandwidthProcess, NULL
+    "Bandwidth", NAME, sizeof(BwState),
+    bwParams, (int)(sizeof(bwParams) / sizeof(bwParams[0])),
+    NULL, bwInit, NULL,
+    bwStartUp, bwCloseDown, bwProcess, bwNextDeadline,
+    NULL, NULL
 };
-
-//---------------------------------------------------------------------
-// rate stats implementation
-//---------------------------------------------------------------------
-static CRateStats *crate_stats_new(int window_size, float scale) {
-    CRateStats *rate = (CRateStats *)malloc(sizeof(CRateStats));
-    assert(rate);
-    rate->array_sum = (uint32_t *)malloc(sizeof(uint32_t) * window_size);
-    assert(rate->array_sum);
-    rate->array_sample = (uint32_t *)malloc(sizeof(uint32_t) * window_size);
-    assert(rate->array_sample);
-    rate->window_size = window_size;
-    rate->scale = scale;
-    crate_stats_reset(rate);
-    return rate;
-}
-
-static void crate_stats_delete(CRateStats *rate) {
-    if (rate) {
-        rate->window_size = 0;
-        if (rate->array_sum) free(rate->array_sum);
-        if (rate->array_sample) free(rate->array_sample);
-        rate->array_sum = NULL;
-        rate->array_sample = NULL;
-        rate->initialized = 0;
-        free(rate);
-    }
-}
-
-static void crate_stats_reset(CRateStats *rate) {
-    int i;
-    for (i = 0; i < rate->window_size; i++) {
-        rate->array_sum[i] = 0;
-        rate->array_sample[i] = 0;
-    }
-    rate->initialized = 0;
-    rate->sample_num = 0;
-    rate->accumulated_count = 0;
-    rate->oldest_ts = 0;
-    rate->oldest_index = 0;
-}
-
-static void crate_stats_evict(CRateStats *rate, uint32_t now_ts) {
-    uint32_t new_oldest_ts;
-    if (rate->initialized == 0)
-        return;
-    new_oldest_ts = now_ts - ((uint32_t)rate->window_size) + 1;
-    if (((int32_t)(new_oldest_ts - rate->oldest_ts)) < 0)
-        return;
-    while (((int32_t)(rate->oldest_ts - new_oldest_ts)) < 0) {
-        uint32_t index = rate->oldest_index;
-        if (rate->sample_num == 0) break;
-        rate->sample_num -= rate->array_sample[index];
-        rate->accumulated_count -= rate->array_sum[index];
-        rate->array_sample[index] = 0;
-        rate->array_sum[index] = 0;
-        rate->oldest_index++;
-        if (rate->oldest_index >= (uint32_t)rate->window_size) {
-            rate->oldest_index = 0;
-        }
-        rate->oldest_ts++;
-    }
-    assert(rate->sample_num >= 0);
-    assert(rate->accumulated_count >= 0);
-    rate->oldest_ts = new_oldest_ts;
-}
-
-static void crate_stats_update(CRateStats *rate, int32_t count, uint32_t now_ts) {
-    int32_t offset, index;
-    if (rate->initialized == 0) {
-        rate->oldest_ts = now_ts;
-        rate->oldest_index = 0;
-        rate->accumulated_count = 0;
-        rate->sample_num = 0;
-        rate->initialized = 1;
-    }
-    if (((int32_t)(now_ts - rate->oldest_ts)) < 0) {
-        return;
-    }
-    crate_stats_evict(rate, now_ts);
-    offset = (int32_t)(now_ts - rate->oldest_ts);
-    index = (rate->oldest_index + offset) % rate->window_size;
-    rate->sample_num++;
-    rate->accumulated_count += count;
-    rate->array_sum[index] += count;
-    rate->array_sample[index] += 1;
-}
-
-static int32_t crate_stats_calculate(CRateStats *rate, uint32_t now_ts) {
-    int32_t active_size = (int32_t)(now_ts - rate->oldest_ts + 1);
-    float r;
-    crate_stats_evict(rate, now_ts);
-    if (rate->initialized == 0 ||
-        rate->sample_num <= 0 ||
-        active_size <= 1 ||
-        active_size < rate->window_size) {
-        return -1;
-    }
-    r = ((((float)rate->accumulated_count) * rate->scale) / rate->window_size) + 0.5f;
-    return (int32_t)r;
-}

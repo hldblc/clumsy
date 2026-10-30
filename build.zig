@@ -32,13 +32,26 @@ const app_sources = [_][]const u8{
     "src/utils.c",
 };
 
-// Driver-free sources exercised by the unit tests (no IUP, no WinDivert linkage).
+// Sources exercised by the unit tests: everything except the engine and the UI.
+// They link WinDivert.dll for its user-mode helpers (parsing, checksums,
+// filter compilation) but never open the driver.
 const test_sources = [_][]const u8{
     "tests/test_main.c",
+    "tests/test_modules.c",
+    "src/bandwidth.c",
     "src/clock.c",
+    "src/drop.c",
+    "src/duplicate.c",
+    "src/lag.c",
+    "src/ood.c",
     "src/packet.c",
     "src/params.c",
+    "src/reset.c",
     "src/rng.c",
+    "src/rules.c",
+    "src/tamper.c",
+    "src/throttle.c",
+    "src/utils.c",
 };
 
 fn versionGreater(a: [4]u32, b: [4]u32) bool {
@@ -234,8 +247,12 @@ pub fn build(b: *Builder) void {
     }
     test_exe.addIncludeDir("src");
     test_exe.addIncludeDir(b.fmt("external/{s}/include", .{windivert_dir}));
+    test_exe.addLibPath(b.fmt("external/{s}/{s}", .{ windivert_dir, arch_tag }));
+    test_exe.linkSystemLibrary("WinDivert");
+    test_exe.linkSystemLibrary("Winmm");
     test_exe.linkLibC();
     const run_tests = test_exe.run();
+    run_tests.addPathDir(b.pathFromRoot(b.fmt("external/{s}/{s}", .{ windivert_dir, arch_tag })));
     const test_step = b.step("test", "build and run the unit tests");
     test_step.dependOn(&run_tests.step);
 }
