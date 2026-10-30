@@ -33,12 +33,14 @@ const app_sources = [_][]const u8{
     "src/reset.c",
     "src/rng.c",
     "src/rules.c",
+    "src/safety.c",
     "src/scenario.c",
     "src/tamper.c",
     "src/tcp.c",
     "src/throttle.c",
     "src/uibind.c",
     "src/utils.c",
+    "src/winui.c",
 };
 
 // Sources exercised by the unit tests: everything except the engine and the UI.
@@ -245,6 +247,7 @@ pub fn build(b: *Builder) void {
     exe.linkSystemLibrary("psapi");
     exe.linkSystemLibrary("advapi32");
     exe.linkSystemLibrary("shell32");
+    exe.linkSystemLibrary("user32");
 
     const exe_install_step = b.addInstallArtifact(exe);
     if (conf == .Ship) {

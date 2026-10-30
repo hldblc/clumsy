@@ -36,6 +36,9 @@ static HANDLE captureThread = NULL, processThread = NULL;
 static HANDLE ringEvent = NULL, wakeEvent = NULL, stopEvent = NULL, spaceEvent = NULL, timerHandle = NULL;
 static volatile LONG engineState = 0;   // 0 stopped, 1 running, 2 stopping
 static int highResTimer = 0;
+static HANDLE watchdogThread = NULL;
+static volatile LONG64 heartbeatUs = 0;
+static int watchdogSeconds = 10;
 static char filterInUse[FILTER_BUFSIZE * RULE_MAX + 64];
 static PacketList passList;             // packets that matched no rule
 
@@ -391,6 +394,7 @@ static DWORD WINAPI processLoop(LPVOID arg) {
         if (deadline >= 0 && now > deadline + 2000) {
             atomicAdd64(&engineStats.lateWakeups, 1);
         }
+        atomicExch64(&heartbeatUs, now);
         drain();
         step(now);
     }
@@ -398,6 +402,34 @@ static DWORD WINAPI processLoop(LPVOID arg) {
     drain();
     flushAll();
     return 0;
+}
+
+// Safety watchdog: if the processor thread stops updating its heartbeat while
+// the engine is running, the process is wedged with diversion active. Closing
+// the handle makes the kernel stop diverting so normal traffic resumes, and
+// the capture/processor loops then error out and exit.
+static DWORD WINAPI watchdogLoop(LPVOID arg) {
+    UNREFERENCED_PARAMETER(arg);
+    while (engineState == 1) {
+        Sleep(500);
+        if (engineState == 1 && watchdogSeconds > 0) {
+            int64_t beat = atomicLoad64(&heartbeatUs);
+            if (beat != 0 && clockNowUs() - beat > (int64_t)watchdogSeconds * 1000000) {
+                LOG("watchdog: processor stalled, force-closing the divert handle to restore traffic");
+                if (divertHandle != INVALID_HANDLE_VALUE) {
+                    WinDivertShutdown(divertHandle, WINDIVERT_SHUTDOWN_BOTH);
+                    WinDivertClose(divertHandle);
+                    divertHandle = INVALID_HANDLE_VALUE;
+                }
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+void engineSetWatchdog(int seconds) {
+    watchdogSeconds = seconds;
 }
 
 // ---- public API ----
@@ -536,6 +568,8 @@ int engineStart(char *err, size_t errSize) {
         return 0;
     }
     SetThreadPriority(captureThread, THREAD_PRIORITY_ABOVE_NORMAL);
+    heartbeatUs = clockNowUs();
+    watchdogThread = CreateThread(NULL, 0, watchdogLoop, NULL, 0, NULL);
     LOG("engine started, high resolution timer: %d", highResTimer);
     return 1;
 }
@@ -574,6 +608,11 @@ void engineStop(void) {
     if (divertHandle != INVALID_HANDLE_VALUE) {
         WinDivertClose(divertHandle);
         divertHandle = INVALID_HANDLE_VALUE;
+    }
+    if (watchdogThread) {
+        WaitForSingleObject(watchdogThread, 2000);
+        CloseHandle(watchdogThread);
+        watchdogThread = NULL;
     }
     if (ringEvent) { CloseHandle(ringEvent); ringEvent = NULL; }
     if (wakeEvent) { CloseHandle(wakeEvent); wakeEvent = NULL; }

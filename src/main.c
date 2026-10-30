@@ -14,6 +14,8 @@
 #include "cli.h"
 #include "scenario.h"
 #include "pcap.h"
+#include "winui.h"
+#include "safety.h"
 
 #define CONFIG_FILE "config.txt"
 #define CONFIG_MAX_RECORDS 64
@@ -867,6 +869,88 @@ static BOOL checkIsRunning(void) {
     return FALSE;
 }
 
+// ---- hotkey / tray / menu callbacks (UI thread) ----
+static void cbStart(void) { if (!engineIsRunning()) uiStartCb(startButton); }
+static void cbStop(void) { if (engineIsRunning()) uiStopCb(startButton); }
+static void cbPanic(void) {
+    if (engineIsRunning()) {
+        uiStopCb(startButton);
+        showStatus("PANIC: filtering stopped, network restored.");
+    }
+}
+static void cbShow(void) {
+    HWND h = (HWND)IupGetAttribute(dialog, "HWND");
+    if (h) { ShowWindow(h, SW_SHOW); ShowWindow(h, SW_RESTORE); SetForegroundWindow(h); }
+}
+static void cbQuit(void) {
+    if (engineIsRunning()) engineStop();
+    IupExitLoop();
+}
+
+static int uiDiagnoseCb(Ihandle *ih) {
+    char msg[MSG_BUFSIZE];
+    UNREFERENCED_PARAMETER(ih);
+    safetyDriverStatus(msg, sizeof(msg));
+    IupMessage("Driver diagnosis", msg);
+    return IUP_DEFAULT;
+}
+
+static int uiRemoveSvcCb(Ihandle *ih) {
+    char msg[MSG_BUFSIZE];
+    UNREFERENCED_PARAMETER(ih);
+    if (engineIsRunning()) {
+        IupMessage("WinDivert service", "Stop filtering first.");
+        return IUP_DEFAULT;
+    }
+    if (IupAlarm("Remove WinDivert service",
+                 "Stop and remove the WinDivert driver service?\n"
+                 "A clean copy installs automatically the next time you Start.\n"
+                 "Use this if Start fails with a driver error.",
+                 "Remove", "Cancel", NULL) != 1) {
+        return IUP_DEFAULT;
+    }
+    safetyRemoveDriverService(msg, sizeof(msg));
+    IupMessage("WinDivert service", msg);
+    return IUP_DEFAULT;
+}
+
+static int uiCliHelpCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    IupMessage("Command line",
+        "clumsy accepts command-line options, for example:\n\n"
+        "  clumsy --filter \"udp and outbound\" --lag on --lag-time 100 --start on\n"
+        "  clumsy --profile 3G --start on --timeout 30\n"
+        "  clumsy --load myconfig.clumsy --headless on\n\n"
+        "Run  clumsy --help  or  --list  in a terminal for the full reference.");
+    return IUP_DEFAULT;
+}
+
+static int uiAboutCb(Ihandle *ih) {
+    UNREFERENCED_PARAMETER(ih);
+    IupMessage("About clumsy",
+        "clumsy " CLUMSY_VERSION "\n"
+        "Interactive network condition simulator built on WinDivert.\n\n"
+        "Hotkeys: F5 start, F6 stop, Ctrl+Alt+F12 panic restore.");
+    return IUP_DEFAULT;
+}
+
+static Ihandle *buildMenu(void) {
+    Ihandle *tools, *help, *bar;
+    Ihandle *mDiagnose, *mRemove, *mCliHelp, *mAbout;
+    mDiagnose = IupItem("Diagnose driver", NULL);
+    IupSetCallback(mDiagnose, "ACTION", uiDiagnoseCb);
+    mRemove = IupItem("Remove WinDivert service", NULL);
+    IupSetCallback(mRemove, "ACTION", uiRemoveSvcCb);
+    tools = IupSubmenu("Tools", IupMenu(mDiagnose, mRemove, NULL));
+    mCliHelp = IupItem("Command-line help", NULL);
+    IupSetCallback(mCliHelp, "ACTION", uiCliHelpCb);
+    mAbout = IupItem("About", NULL);
+    IupSetCallback(mAbout, "ACTION", uiAboutCb);
+    help = IupSubmenu("Help", IupMenu(mCliHelp, mAbout, NULL));
+    bar = IupMenu(tools, help, NULL);
+    return bar;
+}
+
 static int uiOnDialogShow(Ihandle *ih, int state) {
     HWND hWnd;
     BOOL exit;
@@ -890,6 +974,15 @@ static int uiOnDialogShow(Ihandle *ih, int state) {
     }
 
     exit = tryElevate(hWnd, parameterized);
+    if (!exit) {
+        WinUiCallbacks cb;
+        cb.start = cbStart;
+        cb.stop = cbStop;
+        cb.panic = cbPanic;
+        cb.showWindow = cbShow;
+        cb.quit = cbQuit;
+        winuiInstall(hWnd, hInstance, &cb);
+    }
     if (!exit && startOnShow) {
         LOG("auto-start requested, begin filtering");
         uiStartCb(startButton);
@@ -1047,6 +1140,7 @@ static void init(int argc, char *argv[]) {
     IupSetAttribute(dialog, "TITLE", "clumsy " CLUMSY_VERSION);
     IupSetAttribute(dialog, "SIZE", "640x");
     IupSetAttribute(dialog, "RESIZE", "YES");
+    IupSetAttributeHandle(dialog, "MENU", buildMenu());
     IupSetCallback(dialog, "SHOW_CB", (Icallback)uiOnDialogShow);
     IupSetAttribute(dialogVBox, "ALIGNMENT", "ACENTER");
     IupSetAttribute(dialogVBox, "NCMARGIN", "4x4");
@@ -1131,6 +1225,7 @@ int main(int argc, char *argv[]) {
         IupMainLoop();
     }
 
+    winuiShutdown();
     if (engineIsRunning()) {
         engineStop();
     }

@@ -30,3 +30,6 @@ const char *engineFilterInUse(void);
 void engineResetStats(void);
 int  engineHighResolutionTimer(void);           // 1 if the OS gave us a high resolution timer
 void engineDescribeOpenError(DWORD code, char *buf, size_t size);
+// safety watchdog: if the processor stalls this long while running, the divert
+// handle is force-closed so the OS restores normal traffic. 0 disables it.
+void engineSetWatchdog(int seconds);

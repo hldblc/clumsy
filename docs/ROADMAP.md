@@ -32,11 +32,11 @@ Status: [ ] planned, [~] in progress, [x] done.
 - [x] 19. Saved sessions and shareable configs (Save/Load to .clumsy INI-style files)
 - [x] 7. Scripted scenarios on a timeline (Load/Play, progress, looping; etc/scenario-example.txt)
 - [ ] 18. Remote control API (local HTTP + JSON, token protected)
-- [ ] 20. Global hotkeys and tray mode
+- [x] 20. Global hotkeys (F5/F6/Ctrl+Alt+F12 panic) and minimize-to-tray with a menu
 
 ## Observability, safety and platform
 
 - [x] 21. Live statistics window: engine + per-module counters, rolling throughput graph, CSV export
 - [x] 22. Packet log and pcapng export (per-packet action comments, opens in Wireshark)
-- [ ] 23. Safety and recovery hardening: crash flush, diagnostics, driver service control
+- [x] 23. Safety: panic restore, stall watchdog that reopens the link, driver diagnose/remove-service
 - [ ] 25b. CI, CMake, release packaging
